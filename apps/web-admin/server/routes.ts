@@ -54,6 +54,7 @@ import {
   CoreUnavailableError,
   createCoreClientFromEnv,
 } from "./coreClient";
+import { getBuildVersion } from "./version";
 
 function routeParam(value: string | string[]): string {
   return Array.isArray(value) ? value[0] ?? "" : value;
@@ -158,6 +159,10 @@ export async function registerRoutes(
     } catch (error) {
       next(error);
     }
+  });
+
+  app.get("/api/version", (_req, res) => {
+    res.json(getBuildVersion());
   });
 
   // ---------- 概览 KPI(合并到工作台) ----------

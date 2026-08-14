@@ -5,6 +5,7 @@
   "license": "UNLICENSED",
   "type": "module",
   "scripts": {
+    "test": "node --test tests/*.test.mjs",
     "test:boundary": "node --test tests/delivery-boundary.test.mjs",
     "verify:boundary": "node scripts/verify-delivery-boundary.mjs"
   }

@@ -1,0 +1,41 @@
+name: customer-delivery-ci
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '26'
+          cache: npm
+          cache-dependency-path: apps/web-admin/package-lock.json
+      - name: Install dependencies
+        run: npm ci --prefix apps/web-admin --ignore-scripts
+      - name: Audit dependencies
+        run: npm audit --prefix apps/web-admin --audit-level=moderate
+      - name: Verify TypeScript
+        run: npm run check --prefix apps/web-admin
+      - name: Run application tests
+        run: npm run test:customer --prefix apps/web-admin
+      - name: Build Web application
+        run: npm run build --prefix apps/web-admin
+      - name: Run repository tests
+        run: npm test
+      - name: Verify current delivery tree
+        run: node scripts/verify-delivery-boundary.mjs
+      - name: Verify complete Git history
+        run: bash scripts/verify-git-history.sh
+      - name: Verify patch hygiene
+        run: git diff --check
