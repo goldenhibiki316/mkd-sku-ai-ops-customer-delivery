@@ -14,6 +14,24 @@ patterns=(
   "02""_refresh""_classification.sql"
 )
 
+secret_labels=(
+  "GitHub token"
+  "model API key"
+  "cloud access key"
+  "private key block"
+  "configured secret value"
+  "database URL with password"
+)
+
+secret_patterns=(
+  '(ghp|gho|ghs|ghu|github_pat)_[A-Za-z0-9_]{20,}'
+  '(^|[^A-Za-z0-9_-])sk-[A-Za-z0-9_-]{20,}([^A-Za-z0-9_-]|$)'
+  '(AKIA|LTAI)[A-Z0-9]{12,}'
+  '-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----'
+  '(PGPASSWORD|SESSION_SECRET|AI_API_KEY|MODEL_API_KEY)[[:space:]]*=[[:space:]]*[^[:space:]#]'
+  'postgres(ql)?://[^:/[:space:]]+:[^@/[:space:]]+@'
+)
+
 failed=0
 while IFS= read -r commit; do
   while IFS= read -r tracked_path; do
@@ -31,6 +49,15 @@ while IFS= read -r commit; do
   for pattern in "${patterns[@]}"; do
     if git grep -n -I -F "$pattern" "$commit" -- . >/dev/null 2>&1; then
       printf 'protected marker in %s: %s\n' "$commit" "$pattern" >&2
+      failed=1
+    fi
+  done
+
+  for index in "${!secret_patterns[@]}"; do
+    label="${secret_labels[$index]}"
+    pattern="${secret_patterns[$index]}"
+    if git grep -n -I -E -e "$pattern" "$commit" -- . >/dev/null 2>&1; then
+      printf 'secret pattern in %s: %s\n' "$commit" "$label" >&2
       failed=1
     fi
   done

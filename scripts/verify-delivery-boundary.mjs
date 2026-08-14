@@ -57,6 +57,33 @@ const FORBIDDEN_MARKERS = [
   ['严格依以下结构', '输出'].join(''),
 ];
 
+const FORBIDDEN_SECRET_PATTERNS = [
+  {
+    label: 'GitHub token',
+    pattern: /(?:ghp|gho|ghs|ghu|github_pat)_[A-Za-z0-9_]{20,}/,
+  },
+  {
+    label: 'model API key',
+    pattern: /\bsk-[A-Za-z0-9_-]{20,}\b/,
+  },
+  {
+    label: 'cloud access key',
+    pattern: /\b(?:AKIA|LTAI)[A-Z0-9]{12,}\b/,
+  },
+  {
+    label: 'private key block',
+    pattern: /-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/,
+  },
+  {
+    label: 'configured secret value',
+    pattern: /(?:PGPASSWORD|SESSION_SECRET|AI_API_KEY|MODEL_API_KEY)=[^\s#][^\r\n]*/,
+  },
+  {
+    label: 'database URL with password',
+    pattern: /postgres(?:ql)?:\/\/[^:\s]+:[^@\s]+@/,
+  },
+];
+
 const toPosix = (value) => value.split(path.sep).join('/');
 
 function forbiddenPathReason(relativePath) {
@@ -111,9 +138,13 @@ async function inspectMarkers(root, relativePath) {
   const metadata = await stat(absolutePath);
   if (metadata.size > 5 * 1024 * 1024) return [];
   const content = await readFile(absolutePath, 'utf8');
-  return FORBIDDEN_MARKERS
+  const markers = FORBIDDEN_MARKERS
     .filter((marker) => content.includes(marker))
     .map((marker) => `${toPosix(relativePath)}: protected marker ${marker}`);
+  const secrets = FORBIDDEN_SECRET_PATTERNS
+    .filter(({ pattern }) => pattern.test(content))
+    .map(({ label }) => `${toPosix(relativePath)}: secret pattern ${label}`);
+  return [...markers, ...secrets];
 }
 
 export async function auditDeliveryTree(root) {
