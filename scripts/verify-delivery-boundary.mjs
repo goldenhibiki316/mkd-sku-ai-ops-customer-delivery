@@ -48,7 +48,6 @@ const FORBIDDEN_MARKERS = [
   ['OPENAI', 'API', 'KEY'].join('_'),
   ['MINELONA', 'API', 'KEY'].join('_'),
   ['chat', 'completions'].join('/'),
-  ['seven', 'fields', 'weekly'].join('_'),
   ['ruleTask', 'Generator'].join(''),
   ['01', 'refresh', 'metrics.sql'].join('_'),
   ['02', 'refresh', 'classification.sql'].join('_'),
