@@ -24,6 +24,8 @@ test('CI runs build, tests, audit, and both leakage gates', async () => {
   assert.equal(await exists(workflowUrl), true, 'CI workflow is missing');
   if (!await exists(workflowUrl)) return;
   const workflow = await readFile(workflowUrl, 'utf8');
+  assert.match(workflow, /actions\/checkout@v7\.0\.1/);
+  assert.match(workflow, /actions\/setup-node@v7\.0\.0/);
   for (const command of [
     'npm ci',
     'npm audit',
