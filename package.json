@@ -1,0 +1,11 @@
+{
+  "name": "mkd-customer-delivery-guard",
+  "version": "2.1.6-customer.1",
+  "private": true,
+  "license": "UNLICENSED",
+  "type": "module",
+  "scripts": {
+    "test:boundary": "node --test tests/delivery-boundary.test.mjs",
+    "verify:boundary": "node scripts/verify-delivery-boundary.mjs"
+  }
+}
