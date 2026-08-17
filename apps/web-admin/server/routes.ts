@@ -51,6 +51,7 @@ import {
 import { recordPhase } from "./requestContext";
 import {
   CoreProtocolError,
+  CoreResponseError,
   CoreUnavailableError,
   createCoreClientFromEnv,
 } from "./coreClient";
@@ -930,6 +931,10 @@ export async function registerRoutes(
       });
       res.status(200).json(result);
     } catch (error) {
+      if (error instanceof CoreResponseError) {
+        res.status(error.statusCode).json(error.response);
+        return;
+      }
       if (error instanceof CoreUnavailableError || error instanceof CoreProtocolError) {
         res.status(503).json({
           status: "core_unavailable",

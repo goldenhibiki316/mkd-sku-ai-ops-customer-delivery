@@ -56,3 +56,16 @@ test('AI history repository is query-only', async () => {
   assert.doesNotMatch(repository, /\bUPDATE\s+[a-z_]/i);
   assert.doesNotMatch(repository, /\bDELETE\s+FROM\b/i);
 });
+
+test('AI refresh preserves approved core statuses and reserves 503 for transport failures', async () => {
+  const routes = await readFile(routesUrl, 'utf8');
+
+  assert.match(routes, /CoreResponseError/);
+  assert.match(routes, /error instanceof CoreResponseError/);
+  assert.match(routes, /res\.status\(error\.statusCode\)\.json\(error\.response\)/);
+  assert.match(
+    routes,
+    /error instanceof CoreUnavailableError\s*\|\|\s*error instanceof CoreProtocolError/,
+  );
+  assert.match(routes, /res\.status\(503\)/);
+});

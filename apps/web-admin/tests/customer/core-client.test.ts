@@ -82,3 +82,45 @@ test('refreshSku rejects identifiers outside the public contract', async () => {
     /sku is required/,
   );
 });
+
+test('refreshSku preserves the approved core HTTP status contract', async () => {
+  const {
+    CoreClient,
+    CoreResponseError,
+  } = await import(moduleUrl.href);
+  const cases = [
+    [400, 'invalid_request'],
+    [404, 'not_found'],
+    [409, 'generating'],
+    [422, 'schema_invalid'],
+    [500, 'internal_error'],
+    [502, 'model_failed'],
+  ] as const;
+
+  for (const [statusCode, coreStatus] of cases) {
+    const body = {
+      status: coreStatus,
+      request_id: `req-${statusCode}`,
+      analysis_id: null,
+      result: null,
+    };
+    const client = new CoreClient({
+      socketPath: '/tmp/test.sock',
+      transport: async () => ({ status: statusCode, body }),
+    });
+
+    await assert.rejects(
+      () => client.refreshSku({
+        sku: 'SKU-1',
+        requestId: `req-${statusCode}`,
+        actorId: 'user-1',
+      }),
+      (error: unknown) => {
+        assert.equal(error instanceof CoreResponseError, true);
+        assert.equal((error as InstanceType<typeof CoreResponseError>).statusCode, statusCode);
+        assert.deepEqual((error as InstanceType<typeof CoreResponseError>).response, body);
+        return true;
+      },
+    );
+  }
+});

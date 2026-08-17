@@ -46,6 +46,26 @@ export class CoreProtocolError extends Error {
   }
 }
 
+export class CoreResponseError extends Error {
+  constructor(
+    readonly statusCode: number,
+    readonly response: RefreshSkuResponse,
+  ) {
+    super(`proprietary core returned ${statusCode}`);
+    this.name = 'CoreResponseError';
+  }
+}
+
+const approvedStatusContract = new Map<number, string>([
+  [200, 'success'],
+  [400, 'invalid_request'],
+  [404, 'not_found'],
+  [409, 'generating'],
+  [422, 'schema_invalid'],
+  [500, 'internal_error'],
+  [502, 'model_failed'],
+]);
+
 function requiredIdentifier(value: string, field: string): string {
   const normalized = value.trim();
   if (!normalized) throw new TypeError(`${field} is required`);
@@ -55,6 +75,16 @@ function requiredIdentifier(value: string, field: string): string {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+function parseRefreshSkuResponse(body: unknown): RefreshSkuResponse {
+  if (!isRecord(body)) throw new CoreProtocolError();
+  const status = body.status;
+  const requestId = body.request_id;
+  if (typeof status !== 'string' || typeof requestId !== 'string') {
+    throw new CoreProtocolError();
+  }
+  return { ...body, status, request_id: requestId };
 }
 
 function defaultTransport(
@@ -132,16 +162,21 @@ export class CoreClient {
       },
     });
 
-    if (response.status < 200 || response.status >= 300) {
-      throw new CoreUnavailableError(`core request failed with status ${response.status}`);
+    if (response.status === 503) {
+      throw new CoreUnavailableError('core is temporarily unavailable');
     }
-    if (!isRecord(response.body)) throw new CoreProtocolError();
-    const status = response.body.status;
-    const requestId = response.body.request_id;
-    if (typeof status !== 'string' || typeof requestId !== 'string') {
-      throw new CoreProtocolError();
+    const expectedStatus = approvedStatusContract.get(response.status);
+    if (!expectedStatus) {
+      throw new CoreProtocolError('core returned an unapproved HTTP status');
     }
-    return { ...response.body, status, request_id: requestId };
+    const parsed = parseRefreshSkuResponse(response.body);
+    if (parsed.status !== expectedStatus) {
+      throw new CoreProtocolError('core HTTP status and response status disagree');
+    }
+    if (response.status !== 200) {
+      throw new CoreResponseError(response.status, parsed);
+    }
+    return parsed;
   }
 }
 
