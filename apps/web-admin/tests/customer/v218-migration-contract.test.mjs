@@ -13,6 +13,7 @@ const taskAssignmentPolicyUrl = new URL(
   '../../server/services/taskAssignmentPolicy.ts',
   import.meta.url,
 );
+const envExampleUrl = new URL('../../.env.example', import.meta.url);
 
 async function mustRead(url) {
   await access(url);
@@ -72,5 +73,28 @@ test('v2.1.8 customer delivery still exposes only the public core contract', asy
   ]) {
     assert.equal(routes.includes(forbidden), false, `routes leaked ${forbidden}`);
     assert.equal(coreClient.includes(forbidden), false, `coreClient leaked ${forbidden}`);
+  }
+});
+
+test('public deployment template exposes the approved anchor and core knobs only', async () => {
+  const envExample = await mustRead(envExampleUrl);
+
+  for (const marker of [
+    'DATA_ANCHOR_DATE=',
+    'VITE_DATA_ANCHOR_DATE=',
+    'MKD_CORE_SOCKET=',
+    'MKD_CORE_TIMEOUT_MS=',
+  ]) {
+    assert.equal(envExample.includes(marker), true, `missing public env marker ${marker}`);
+  }
+
+  for (const forbidden of [
+    'sk-',
+    'AKIA',
+    'BEGIN PRIVATE KEY',
+    'postgresql://',
+    `${['MODEL', 'API', 'KEY'].join('_')}=`,
+  ]) {
+    assert.equal(envExample.includes(forbidden), false, `env template leaked ${forbidden}`);
   }
 });
