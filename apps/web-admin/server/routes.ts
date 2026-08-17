@@ -55,6 +55,14 @@ import {
   createCoreClientFromEnv,
 } from "./coreClient";
 import { getBuildVersion } from "./version";
+import { buildTaskFilter } from "./services/taskFilters";
+import {
+  TaskReopenRequiredError,
+  assignmentRequiresWrite,
+  canOperateTask,
+  normalizeTaskStatus,
+  planAssignmentChange,
+} from "./services/taskAssignmentPolicy";
 
 function routeParam(value: string | string[]): string {
   return Array.isArray(value) ? value[0] ?? "" : value;
@@ -166,9 +174,39 @@ export async function registerRoutes(
   });
 
   // ---------- 概览 KPI(合并到工作台) ----------
-  app.get("/api/overview", async (_req, res, next) => {
+  app.get("/api/overview", requireAuth, async (req, res, next) => {
     try {
-      const [master, weekly, tasks, transitions] = await Promise.all([
+      const sessionUser = req.session.user!;
+      const ownerFilter = String(req.query.owner_filter || "all").toLowerCase();
+      const owner = req.query.owner ? String(req.query.owner) : null;
+      const taskScope = buildTaskFilter({
+        status: "all",
+        priority: null,
+        owner,
+        ownerFilter,
+        taskType: null,
+        search: "",
+        user: sessionUser,
+      });
+      const taskPoolScope = buildTaskFilter({
+        status: "all",
+        priority: null,
+        owner: null,
+        ownerFilter: "unassigned",
+        taskType: null,
+        search: "",
+        user: sessionUser,
+      });
+      const taskAssignedScope = buildTaskFilter({
+        status: "all",
+        priority: null,
+        owner: null,
+        ownerFilter: "assigned",
+        taskType: null,
+        search: "",
+        user: sessionUser,
+      });
+      const [master, weekly, tasks, taskPool, taskAssigned, transitions] = await Promise.all([
         qRead<{ total: number }>(`SELECT count(*)::int as total FROM business.sku_master`),
         qRead<{ total: number; year: number; week: number }>(
           `SELECT count(*)::int as total, iso_year as year, iso_week as week
@@ -179,11 +217,22 @@ export async function registerRoutes(
         ),
         qRead<{ pending: number; done: number; claimed: number }>(`
           SELECT
-            count(*) FILTER (WHERE lower(status) IN ('open','pending'))::int as pending,
-            count(*) FILTER (WHERE lower(status) IN ('claimed','doing','in_progress'))::int as claimed,
-            count(*) FILTER (WHERE lower(status) IN ('done','closed'))::int as done
-          FROM business.ops_task
-        `),
+            count(*) FILTER (WHERE lower(t.status) IN ('open','pending'))::int as pending,
+            count(*) FILTER (WHERE lower(t.status) IN ('claimed','doing','in_progress'))::int as claimed,
+            count(*) FILTER (WHERE lower(t.status) IN ('done','closed','dismissed'))::int as done
+          FROM business.ops_task t
+          WHERE ${taskScope.sql}
+        `, taskScope.params),
+        qRead<{ total: number }>(`
+          SELECT count(*)::int AS total
+          FROM business.ops_task t
+          WHERE ${taskPoolScope.sql}
+        `, taskPoolScope.params),
+        qRead<{ total: number }>(`
+          SELECT count(*)::int AS total
+          FROM business.ops_task t
+          WHERE ${taskAssignedScope.sql}
+        `, taskAssignedScope.params),
         qRead<{ total: number }>(`SELECT count(*)::int as total FROM business.sku_classification_transition`),
       ]);
       res.json({
@@ -195,6 +244,8 @@ export async function registerRoutes(
         task_pending: tasks[0]?.pending ?? 0,
         task_claimed: tasks[0]?.claimed ?? 0,
         task_done: tasks[0]?.done ?? 0,
+        task_pool: taskPool[0]?.total ?? 0,
+        task_assigned: taskAssigned[0]?.total ?? 0,
         total_transitions: transitions[0]?.total ?? 0,
       });
     } catch (error) {
@@ -203,7 +254,7 @@ export async function registerRoutes(
   });
 
   // ---------- ① 运营工作台:任务列表(含商品名/图) ----------
-  app.get("/api/tasks", async (req, res, next) => {
+  app.get("/api/tasks", requireAuth, async (req, res, next) => {
     try {
       const status = String(req.query.status || "OPEN");
       const priority = req.query.priority ? Number(req.query.priority) : null;
@@ -241,6 +292,16 @@ export async function registerRoutes(
         sql: string,
         params: unknown[] = [],
       ): Promise<T[]> => qRead<T>(sql, params);
+      const filterInput = {
+        status,
+        priority,
+        owner,
+        ownerFilter,
+        taskType,
+        search,
+        user: sessionUser,
+      };
+      const preparedFilter = buildTaskFilter(filterInput);
       const input = {
         page: hasPage ? page : 1,
         pageSize: limit,
@@ -252,15 +313,8 @@ export async function registerRoutes(
         defaultQuery: query,
         createDependencies: (scopedQuery) => createTaskReadDependencies({
           query: scopedQuery,
-          filter: {
-            status,
-            priority,
-            owner,
-            ownerFilter,
-            taskType,
-            search,
-            user: sessionUser,
-          },
+          filter: filterInput,
+          preparedFilter,
           limit,
           offset,
           sort: sortMode,
@@ -288,30 +342,35 @@ export async function registerRoutes(
     }
   });
 
-  app.get("/api/tasks/stats", async (req, res, next) => {
+  app.get("/api/tasks/stats", requireAuth, async (req, res, next) => {
     try {
-      // 支持 status/priority 过滤下的 task_type 计数(用于二级 Tab 显示每类条数)
-      const statusIn = String(req.query.status || "").toLowerCase();
-      let statusDbVals: string[] | null = null;
-      if (statusIn && statusIn !== "all") {
-        if (statusIn === "open" || statusIn === "pending") statusDbVals = ["open", "pending"];
-        else if (statusIn === "in_progress" || statusIn === "claimed" || statusIn === "doing") statusDbVals = ["in_progress", "doing", "claimed"];
-        else if (statusIn === "done" || statusIn === "closed") statusDbVals = ["closed", "done", "dismissed"];
-      }
       const priority = req.query.priority ? Number(req.query.priority) : null;
-
-      const conds: string[] = ["1=1"];
-      const params: any[] = [];
-      if (statusDbVals) { params.push(statusDbVals); conds.push(`lower(status) = ANY($${params.length}::text[])`); }
-      if (priority !== null) { params.push(priority); conds.push(`priority = $${params.length}`); }
-      const whereSql = conds.join(" AND ");
+      const owner = req.query.owner ? String(req.query.owner) : null;
+      const ownerFilter = String(req.query.owner_filter || "all").toLowerCase();
+      const taskType = req.query.task_type ? String(req.query.task_type) : null;
+      const search = String(req.query.search || "").trim();
+      const taskScope = buildTaskFilter({
+        status: String(req.query.status || "all"),
+        priority,
+        owner,
+        ownerFilter,
+        taskType,
+        search,
+        user: req.session.user!,
+      });
+      const fromSql = `FROM business.ops_task t
+        LEFT JOIN business.sku_master s ON s.sku = t.sku
+        LEFT JOIN middleware.mkd_customer_product mp ON mp.sku = t.sku
+        WHERE ${taskScope.sql}`;
 
       const [byStatus, byPriority, byTaskType] = await Promise.all([
-        qRead(`SELECT status, count(*)::int as count FROM business.ops_task GROUP BY status ORDER BY count DESC`),
-        qRead(`SELECT priority, count(*)::int as count FROM business.ops_task GROUP BY priority ORDER BY priority DESC NULLS LAST`),
-        qRead(`SELECT COALESCE(task_type, 'review') as task_type, count(*)::int as count
-             FROM business.ops_task WHERE ${whereSql}
-             GROUP BY task_type ORDER BY count DESC`, params),
+        qRead(`SELECT t.status, count(*)::int as count ${fromSql}
+          GROUP BY t.status ORDER BY count DESC`, taskScope.params),
+        qRead(`SELECT t.priority, count(*)::int as count ${fromSql}
+          GROUP BY t.priority ORDER BY t.priority DESC NULLS LAST`, taskScope.params),
+        qRead(`SELECT COALESCE(t.task_type, 'review') as task_type,
+          count(*)::int as count ${fromSql}
+          GROUP BY t.task_type ORDER BY count DESC`, taskScope.params),
       ]);
       res.json({ by_status: byStatus, by_priority: byPriority, by_task_type: byTaskType });
     } catch (error) {
@@ -326,142 +385,56 @@ export async function registerRoutes(
   const TRANSITIONS: Record<TaskStatus, TaskStatus[]> = {
     open:        ["in_progress", "done"],
     in_progress: ["done", "open"],
-    done:        ["open", "in_progress"], // 允许回退，保留灵活
+    done:        ["open"],
   };
   // API 三态 ↔ DB 实存值
   const toDbStatus  = (s: TaskStatus): string => s === "done" ? "closed" : s;
-  const toApiStatus = (s: string | null | undefined): TaskStatus => {
-    const v = String(s || "").toLowerCase();
-    if (v === "closed" || v === "done") return "done";
-    if (v === "in_progress" || v === "doing" || v === "claimed") return "in_progress";
-    return "open";
+  const toApiStatus = normalizeTaskStatus;
+
+  const isActiveOperator = async (username: string): Promise<boolean> => {
+    const rows = await q<{ username: string }>(
+      `SELECT username
+         FROM business_ext.app_user_ext
+        WHERE username = $1
+          AND role = 'operator'
+          AND is_active = true`,
+      [username],
+    );
+    return rows.length > 0;
   };
 
-  app.patch("/api/tasks/:id/status", async (req, res, next) => {
+  // 批量路由必须注册在 /:id/assign 之前，避免 batch 被识别成任务 id。
+  app.patch("/api/tasks/batch/assign", requireAuth, async (req, res, next) => {
     try {
-      const id = String(req.params.id);
-      const nextStatus = String(req.body?.status || "").toLowerCase() as TaskStatus;
-      const owner    = req.body?.owner    ? String(req.body.owner).slice(0, 64)    : null;
-      const doneNote = req.body?.done_note ? String(req.body.done_note).slice(0, 500) : null;
-
-      if (!ALLOWED_STATUS.includes(nextStatus)) {
-        return res.status(400).json({ error: `status 必须为 ${ALLOWED_STATUS.join("/")}` });
+      const sessionUser = req.session.user!;
+      if (sessionUser.role !== "admin") {
+        return res.status(403).json({ error: "仅运营主管可以批量指派任务" });
       }
-
-      // 取当前状态
-      const cur = await q<{ status: string }>(
-        `SELECT status FROM business.ops_task WHERE id = $1::uuid`, [id]
-      );
-      if (cur.length === 0) return res.status(404).json({ error: "任务不存在" });
-      const curStatus = toApiStatus(cur[0].status);
-      if (!TRANSITIONS[curStatus]?.includes(nextStatus)) {
-        return res.status(422).json({
-          error: `不允许的状态转换：${curStatus} → ${nextStatus}`
-        });
-      }
-
-      // 写入（根据目标状态额外时间戳），DB 存值经 toDbStatus 映射
-      const sets: string[] = ["status = $1", "updated_at = now()"];
-      const params: any[] = [toDbStatus(nextStatus)];
-      if (nextStatus === "in_progress") {
-        sets.push("claimed_at = COALESCE(claimed_at, now())");
-        // v1.6: 接手时自动将 owner 设为当前登录用户(如果未传 owner)
-        const sessUser2 = (req as any).session?.user as { username: string } | undefined;
-        const targetOwner = owner || sessUser2?.username || null;
-        if (targetOwner) { params.push(targetOwner); sets.push(`owner = $${params.length}`); }
-      }
-      if (nextStatus === "done") {
-        sets.push("done_at = now()", "closed_at = now()");
-        if (doneNote) { params.push(doneNote); sets.push(`done_note = $${params.length}`); }
-      }
-      if (nextStatus === "open") {
-        sets.push("claimed_at = NULL", "done_at = NULL", "closed_at = NULL");
-      }
-
-      params.push(id);
-      const sql = `UPDATE business.ops_task SET ${sets.join(", ")} WHERE id = $${params.length}::uuid RETURNING id, status, owner, claimed_at, done_at, done_note, updated_at`;
-      const rows = await q<any>(sql, params);
-      // 对外回传统一 API 三态
-      const t = rows[0];
-      if (t) t.status = toApiStatus(t.status);
-      res.json({ ok: true, task: t });
-    } catch (error) {
-      next(error);
-    }
-  });
-
-  // v1.6 改进2: PATCH /api/tasks/:id/assign—— 仅 admin 可指派任务给某个 operator
-  app.patch("/api/tasks/:id/assign", async (req, res, next) => {
-    try {
-      const sessUser = (req as any).session?.user as { username: string; role: string } | undefined;
-      if (!sessUser) return res.status(401).json({ error: "未登录" });
-      if (sessUser.role !== "admin") return res.status(403).json({ error: "仅运营主管可以指派任务" });
-
-      const { id } = req.params;
-      const { owner } = req.body || {};
-      // owner = null / 空字符串 → 释放回任务池; 否则指派给该 username
-      const newOwner = owner === null || owner === "" || owner === undefined ? null : String(owner).trim();
-
-      // 验证 target user 存在且 active
-      if (newOwner) {
-        const uRows = await q<{ role: string; is_active: boolean }>(
-          `SELECT role, is_active FROM business_ext.app_user_ext WHERE username = $1`,
-          [newOwner]
-        );
-        if (uRows.length === 0) return res.status(404).json({ error: `账号 ${newOwner} 不存在` });
-        if (!uRows[0].is_active) return res.status(400).json({ error: `账号 ${newOwner} 已停用` });
-      }
-
-      const rows = await q<any>(
-        `UPDATE business.ops_task
-           SET owner = $1::text, updated_at = now(),
-               claimed_at = CASE WHEN $1::text IS NOT NULL THEN COALESCE(claimed_at, now()) ELSE claimed_at END
-         WHERE id = $2::uuid
-       RETURNING id, status, owner, claimed_at`,
-        [newOwner, id]
-      );
-      if (rows.length === 0) return res.status(404).json({ error: "任务不存在" });
-      const t = rows[0];
-      t.status = toApiStatus(t.status);
-      res.json({ ok: true, task: t });
-    } catch (error) {
-      next(error);
-    }
-  });
-
-  // v1.7: PATCH /api/tasks/batch/assign—— 批量指派(仅 admin)
-  // body: { task_ids?: string[], skus?: string[], task_type?: string, owner: string }
-  // 可直接指定 task_ids,或 按 SKU 列表批量,或 按 任务类型批量(按分类一键)
-  app.patch("/api/tasks/batch/assign", async (req, res, next) => {
-    try {
-      const sessUser = (req as any).session?.user as { username: string; role: string } | undefined;
-      if (!sessUser) return res.status(401).json({ error: "未登录" });
-      if (sessUser.role !== "admin") return res.status(403).json({ error: "仅运营主管可以指派任务" });
 
       const body = req.body || {};
       const rawOwner = body.owner;
-      const newOwner = rawOwner === null || rawOwner === "" || rawOwner === undefined ? null : String(rawOwner).trim();
-      const taskIds: string[] = Array.isArray(body.task_ids) ? body.task_ids.filter(Boolean).map(String) : [];
-      const skus: string[] = Array.isArray(body.skus) ? body.skus.filter(Boolean).map((s: any) => String(s).trim()) : [];
-      const taskType: string | null = body.task_type ? String(body.task_type) : null;
+      const newOwner = rawOwner === null || rawOwner === "" || rawOwner === undefined
+        ? null
+        : String(rawOwner).trim();
+      const taskIds: string[] = Array.isArray(body.task_ids)
+        ? body.task_ids.filter(Boolean).map(String)
+        : [];
+      const skus: string[] = Array.isArray(body.skus)
+        ? body.skus.filter(Boolean).map((value: unknown) => String(value).trim())
+        : [];
+      const taskType = body.task_type ? String(body.task_type) : null;
       const onlyUnassigned = body.only_unassigned === true || body.only_unassigned === "true";
 
       if (taskIds.length === 0 && skus.length === 0 && !taskType) {
         return res.status(400).json({ error: "必须提供 task_ids / skus / task_type 之一" });
       }
-
-      // 验证 target user
-      if (newOwner) {
-        const uRows = await q<{ role: string; is_active: boolean }>(
-          `SELECT role, is_active FROM business_ext.app_user_ext WHERE username = $1`,
-          [newOwner]
-        );
-        if (uRows.length === 0) return res.status(404).json({ error: `账号 ${newOwner} 不存在` });
-        if (!uRows[0].is_active) return res.status(400).json({ error: `账号 ${newOwner} 已停用` });
+      if (newOwner && !(await isActiveOperator(newOwner))) {
+        return res.status(400).json({
+          error: `账号 ${newOwner} 不存在、已停用或角色不是运营人员`,
+        });
       }
 
-      // 构造 WHERE
-      const params: any[] = [newOwner];
+      const params: unknown[] = [newOwner];
       let where = "1=1";
       if (taskIds.length > 0) {
         params.push(taskIds);
@@ -472,25 +445,219 @@ export async function registerRoutes(
         where += ` AND sku = ANY($${params.length}::text[])`;
       }
       if (taskType) {
-        // 根据 SKU 的当前分类过滤(同 Workbench Tab 逻辑)
         params.push(taskType);
-        where += ` AND sku IN (SELECT sku FROM business.sku_master WHERE current_type_code = $${params.length})`;
+        where += ` AND task_type = $${params.length}`;
       }
-      if (onlyUnassigned) {
-        where += " AND owner IS NULL";
-      }
-      // 只指派未完成的任务(已完成不变)
-      where += " AND status IN ('todo','doing')";
+      if (onlyUnassigned) where += " AND owner IS NULL";
+      where += " AND lower(status) IN ('open','pending','in_progress','doing','claimed')";
 
       const rows = await q<any>(
         `UPDATE business.ops_task
-            SET owner = $1::text, updated_at = now(),
-                claimed_at = CASE WHEN $1::text IS NOT NULL THEN COALESCE(claimed_at, now()) ELSE claimed_at END
+            SET owner = $1::text,
+                status = 'open',
+                claimed_at = NULL,
+                updated_at = now()
           WHERE ${where}
-        RETURNING id, sku, owner`,
-        params
+        RETURNING id, sku, status, owner, claimed_at`,
+        params,
       );
+      for (const task of rows) task.status = toApiStatus(task.status);
       res.json({ ok: true, updated_count: rows.length, tasks: rows });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.patch("/api/tasks/:id/status", requireAuth, async (req, res, next) => {
+    try {
+      const id = String(req.params.id);
+      const nextStatus = String(req.body?.status || "").toLowerCase() as TaskStatus;
+      const requestedOwner = req.body?.owner
+        ? String(req.body.owner).slice(0, 64)
+        : null;
+      const doneNote = req.body?.done_note
+        ? String(req.body.done_note).slice(0, 500)
+        : null;
+
+      if (!ALLOWED_STATUS.includes(nextStatus)) {
+        return res.status(400).json({
+          error: `status 必须为 ${ALLOWED_STATUS.join("/")}`,
+        });
+      }
+
+      const currentRows = await q<{ status: string; owner: string | null }>(
+        `SELECT status, owner FROM business.ops_task WHERE id = $1::uuid`,
+        [id],
+      );
+      if (currentRows.length === 0) {
+        return res.status(404).json({ error: "任务不存在" });
+      }
+      const current = currentRows[0];
+      const currentStatus = toApiStatus(current.status);
+      const sessionUser = req.session.user!;
+
+      if (!TRANSITIONS[currentStatus]?.includes(nextStatus)) {
+        return res.status(422).json({
+          error: `不允许的状态转换：${currentStatus} → ${nextStatus}`,
+        });
+      }
+      if (!canOperateTask(sessionUser, current.owner, nextStatus)) {
+        return res.status(403).json({
+          error: "只能操作分配给自己的任务，或从任务池接手任务",
+          code: "TASK_OWNER_FORBIDDEN",
+        });
+      }
+
+      let nextOwner = current.owner;
+      if (nextStatus === "in_progress") {
+        nextOwner = sessionUser.role === "operator"
+          ? sessionUser.username
+          : requestedOwner || current.owner;
+        if (!nextOwner) {
+          return res.status(409).json({
+            error: "任务需先指派运营人员，再开始处理",
+            code: "TASK_STATE_CONFLICT",
+          });
+        }
+        if (requestedOwner && !(await isActiveOperator(nextOwner))) {
+          return res.status(400).json({
+            error: `账号 ${nextOwner} 不存在、已停用或角色不是运营人员`,
+          });
+        }
+      }
+      if (nextStatus === "open" && currentStatus === "in_progress") {
+        nextOwner = null;
+      }
+
+      const params: unknown[] = [toDbStatus(nextStatus), nextOwner];
+      const sets = ["status = $1", "owner = $2::text", "updated_at = now()"];
+      if (nextStatus === "in_progress") {
+        sets.push("claimed_at = COALESCE(claimed_at, now())");
+      }
+      if (nextStatus === "done") {
+        sets.push("done_at = now()", "closed_at = now()");
+        if (doneNote) {
+          params.push(doneNote);
+          sets.push(`done_note = $${params.length}`);
+        }
+      }
+      if (nextStatus === "open") {
+        sets.push("claimed_at = NULL", "done_at = NULL", "closed_at = NULL");
+      }
+      params.push(id, current.status, current.owner);
+      const idPlaceholder = `$${params.length - 2}`;
+      const statusPlaceholder = `$${params.length - 1}`;
+      const ownerPlaceholder = `$${params.length}`;
+      const rows = await q<any>(
+        `UPDATE business.ops_task
+            SET ${sets.join(", ")}
+          WHERE id = ${idPlaceholder}::uuid
+            AND status = ${statusPlaceholder}
+            AND owner IS NOT DISTINCT FROM ${ownerPlaceholder}::text
+        RETURNING id, status, owner, claimed_at, done_at, done_note, updated_at`,
+        params,
+      );
+      if (rows.length === 0) {
+        return res.status(409).json({
+          error: "任务已被其他操作更新，请刷新后重试",
+          code: "TASK_STATE_CONFLICT",
+        });
+      }
+      rows[0].status = toApiStatus(rows[0].status);
+      res.json({ ok: true, task: rows[0] });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.patch("/api/tasks/:id/assign", requireAuth, async (req, res, next) => {
+    try {
+      const sessionUser = req.session.user!;
+      if (sessionUser.role !== "admin") {
+        return res.status(403).json({ error: "仅运营主管可以指派任务" });
+      }
+
+      const id = String(req.params.id);
+      const rawOwner = req.body?.owner;
+      const newOwner = rawOwner === null || rawOwner === "" || rawOwner === undefined
+        ? null
+        : String(rawOwner).trim();
+      if (newOwner && !(await isActiveOperator(newOwner))) {
+        return res.status(400).json({
+          error: `账号 ${newOwner} 不存在、已停用或角色不是运营人员`,
+        });
+      }
+
+      const currentRows = await q<{
+        status: string;
+        owner: string | null;
+        claimed_at: string | null;
+        updated_at: string;
+      }>(
+        `SELECT status, owner, claimed_at::text, updated_at::text
+           FROM business.ops_task
+          WHERE id = $1::uuid`,
+        [id],
+      );
+      if (currentRows.length === 0) {
+        return res.status(404).json({ error: "任务不存在" });
+      }
+      const current = currentRows[0];
+
+      let change;
+      try {
+        change = planAssignmentChange({
+          currentStatus: current.status,
+          currentOwner: current.owner,
+          nextOwner: newOwner,
+        });
+      } catch (error) {
+        if (error instanceof TaskReopenRequiredError) {
+          return res.status(409).json({ error: error.message, code: error.code });
+        }
+        throw error;
+      }
+
+      if (!assignmentRequiresWrite(current.owner, newOwner)) {
+        return res.json({
+          ok: true,
+          task: {
+            id,
+            status: toApiStatus(current.status),
+            owner: current.owner,
+            claimed_at: current.claimed_at,
+            updated_at: current.updated_at,
+          },
+        });
+      }
+
+      const rows = await q<any>(
+        `UPDATE business.ops_task
+            SET owner = $1::text,
+                status = $2,
+                claimed_at = CASE WHEN $3::boolean THEN NULL ELSE claimed_at END,
+                updated_at = now()
+          WHERE id = $4::uuid
+            AND status = $5
+            AND owner IS NOT DISTINCT FROM $6::text
+        RETURNING id, status, owner, claimed_at, updated_at`,
+        [
+          change.owner,
+          toDbStatus(change.status),
+          change.clearClaimedAt,
+          id,
+          current.status,
+          current.owner,
+        ],
+      );
+      if (rows.length === 0) {
+        return res.status(409).json({
+          error: "任务已被其他操作更新，请刷新后重试",
+          code: "TASK_STATE_CONFLICT",
+        });
+      }
+      rows[0].status = toApiStatus(rows[0].status);
+      res.json({ ok: true, task: rows[0] });
     } catch (error) {
       next(error);
     }

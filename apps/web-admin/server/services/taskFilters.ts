@@ -37,18 +37,16 @@ export function buildTaskFilter(
     clauses.push(`lower(t.status) = ANY(${add(statusValues(input.status))}::text[])`);
   }
   if (input.priority !== null) clauses.push(`t.priority = ${add(input.priority)}`);
-  if (input.owner) clauses.push(`t.owner = ${add(input.owner)}`);
 
   const ownerFilter = input.ownerFilter.toLowerCase();
   if (input.user?.role === "operator") {
-    const me = add(input.user.username);
-    clauses.push(`(t.owner IS NULL OR t.owner = ${me})`);
-    if (ownerFilter === "mine") clauses.push(`t.owner = ${add(input.user.username)}`);
     if (ownerFilter === "unassigned") clauses.push("t.owner IS NULL");
+    else clauses.push(`t.owner = ${add(input.user.username)}`);
   }
   if (input.user?.role === "admin") {
-    if (["assigned", "mine"].includes(ownerFilter)) clauses.push("t.owner IS NOT NULL");
-    if (ownerFilter === "unassigned") clauses.push("t.owner IS NULL");
+    if (input.owner) clauses.push(`t.owner = ${add(input.owner)}`);
+    else if (ownerFilter === "assigned") clauses.push("t.owner IS NOT NULL");
+    else if (ownerFilter === "unassigned") clauses.push("t.owner IS NULL");
   }
 
   if (input.taskType && input.taskType !== "ALL") {

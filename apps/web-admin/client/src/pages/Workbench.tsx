@@ -1,13 +1,13 @@
 import { useState, useEffect, useRef } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { Link, useLocation } from "wouter";
+import { useLocation } from "wouter";
 import { ApiError, apiRequest } from "@/lib/queryClient";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import SkuDetailDrawer from "@/components/SkuDetailDrawer";
-import { HelpCircle, Package, PieChart as PieChartIcon, ArrowRightLeft, ClipboardCheck, ImageOff, Store, Tag, Sparkles, Loader2, PlayCircle, CheckCircle2, RotateCcw, UserPlus, Users, ClipboardPaste, CheckSquare, Square, X } from "lucide-react";
+import { HelpCircle, Package, PieChart as PieChartIcon, ArrowRightLeft, ClipboardList, UserRoundCheck, Inbox, ClipboardCheck, ImageOff, Store, Tag, Sparkles, Loader2, PlayCircle, CheckCircle2, RotateCcw, UserPlus, Users, ClipboardPaste, CheckSquare, Square } from "lucide-react";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
 import { Textarea } from "@/components/ui/textarea";
 import { Button } from "@/components/ui/button";
@@ -62,6 +62,8 @@ type Overview = {
   task_pending: number;
   task_claimed: number;
   task_done: number;
+  task_pool: number;
+  task_assigned: number;
   total_transitions: number;
 };
 
@@ -86,6 +88,7 @@ type Task = {
   expected_impact: string | null;
   status: string;
   owner: string | null;
+  owner_display_name: string | null;
   due_date: string | null;
   created_at: string;
   weekly_gmv: number | null;
@@ -153,6 +156,9 @@ const taskTypeZh = (code: string | null | undefined) => {
 export default function Workbench() {
   const [, navigate] = useLocation();
   const queryClient = useQueryClient();
+  const { user: authUser } = useAuth();
+  const isAdmin = authUser?.role === "admin";
+  const isOperator = authUser?.role === "operator";
   const [status, setStatus] = useState("open");
   const [priority, setPriority] = useState<string>("ALL");
   const [taskType, setTaskType] = useState<string>("ALL");  // v1.6 二级 Tab
@@ -165,12 +171,18 @@ export default function Workbench() {
   const [searchQuery, setSearchQuery] = useState<string>(""); // debounced
   // v1.7: 指派可见性 + 批量指派
   const [ownerFilter, setOwnerFilter] = useState<"all" | "unassigned" | "assigned" | "mine">("all");
+  const [ownerUsername, setOwnerUsername] = useState("all");
   const outOfRangeRecoveryKeyRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!authUser) return;
+    setOwnerFilter(authUser.role === "operator" ? "mine" : "all");
+    setOwnerUsername("all");
+  }, [authUser?.role]);
   // 筛选变化时自动回到第一页
   useEffect(() => {
     setPage(1);
     outOfRangeRecoveryKeyRef.current = null;
-  }, [status, priority, taskType, sortMode, ownerFilter, searchQuery, pageSize]);
+  }, [status, priority, taskType, sortMode, ownerFilter, ownerUsername, searchQuery, pageSize]);
   // search 防抖(300ms)
   useEffect(() => {
     const h = setTimeout(() => setSearchQuery(searchInput.trim()), 300);
@@ -188,12 +200,14 @@ export default function Workbench() {
 
   // v1.6 当前状态+优先级筛选下的各 task_type 计数(用于二级 Tab 展示)
   const { data: taskStats } = useQuery<{ by_task_type: { task_type: string; count: number }[] }>({
-    queryKey: ["/api/tasks/stats", status, priority],
+    queryKey: ["/api/tasks/stats", status, priority, ownerFilter, ownerUsername],
     ...liveDataQueryOptions,
     queryFn: async () => {
       const p = new URLSearchParams();
       if (status && status !== "ALL") p.set("status", status);
       if (priority && priority !== "ALL") p.set("priority", priority);
+      p.set("owner_filter", ownerFilter);
+      if (isAdmin && ownerUsername !== "all") p.set("owner", ownerUsername);
       const r = await apiRequest("GET", `/api/tasks/stats?${p.toString()}`);
       return r.json();
     },
@@ -202,7 +216,7 @@ export default function Workbench() {
   (taskStats?.by_task_type || []).forEach(r => { typeCounts[r.task_type] = r.count; });
   const totalCount = Object.values(typeCounts).reduce((a, b) => a + b, 0);
 
-  const taskQueryKey = ["/api/tasks", status, priority, taskType, sortMode, ownerFilter, page, pageSize, searchQuery] as const;
+  const taskQueryKey = ["/api/tasks", status, priority, taskType, sortMode, ownerFilter, ownerUsername, page, pageSize, searchQuery] as const;
   const taskRequestKey = JSON.stringify(taskQueryKey);
   const {
     data: taskData,
@@ -221,6 +235,7 @@ export default function Workbench() {
       if (taskType && taskType !== "ALL") p.set("task_type", taskType);
       if (sortMode === "ai") p.set("sort", "ai");
       if (ownerFilter && ownerFilter !== "all") p.set("owner_filter", ownerFilter);
+      if (isAdmin && ownerUsername !== "all") p.set("owner", ownerUsername);
       // v1.9 分页 + 搜索
       p.set("page", String(page));
       p.set("page_size", String(pageSize));
@@ -248,16 +263,14 @@ export default function Workbench() {
     setPage(error.last_page);
   }, [error, isError, taskRequestKey]);
 
-  // Q3 任务状态切换 mutation
-  const { user: authUser } = useAuth();
-  const isAdmin = authUser?.role === "admin";
-
   // v1.6 admin 看到的可指派 operator 列表
   const { data: operatorsData } = useQuery<{ users: Array<{ username: string; display_name: string; role: string; is_active: boolean }> }>({
     queryKey: ["/api/users"],
     enabled: isAdmin,
   });
-  const operatorOptions = (operatorsData?.users || []).filter(u => u.is_active);
+  const operatorOptions = (operatorsData?.users || []).filter(
+    (user) => user.is_active && user.role === "operator",
+  );
 
   // v1.6 指派 mutation
   const assignMut = useMutation({
@@ -271,6 +284,7 @@ export default function Workbench() {
       toast({ title: vars.owner ? `已指派给 ${vars.owner}` : "已释放回任务池" });
       queryClient.invalidateQueries({ queryKey: ["/api/tasks"] });
       queryClient.invalidateQueries({ queryKey: ["/api/tasks/stats"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/overview"] });
     },
     onError: (e: any) => toast({ title: "指派失败", description: e.message, variant: "destructive" as any }),
   });
@@ -287,6 +301,7 @@ export default function Workbench() {
       toast({ title: `批量指派完成`, description: `成功将 ${data.updated_count} 条任务指派给 ${vars.owner}` });
       queryClient.invalidateQueries({ queryKey: ["/api/tasks"] });
       queryClient.invalidateQueries({ queryKey: ["/api/tasks/stats"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/overview"] });
       setSelectedIds(new Set());
       setSelectMode(false);
       setBatchOwnerFor(null);
@@ -358,69 +373,193 @@ export default function Workbench() {
   return (
     <div className="p-8 space-y-6">
       <div>
-        <h1 className="text-xl font-semibold" data-testid="text-workbench-title">运营工作台</h1>
+        <h1 className="text-xl font-semibold" data-testid="text-workbench-title">
+          {isOperator ? "我的工作台" : "运营任务工作台"}
+        </h1>
         <p className="text-sm text-muted-foreground mt-1">
-          今日任务进度 · 待处理 {overview?.task_pending ?? "—"} · 已完成 {overview?.task_done ?? 0}
+          {isOperator
+            ? `我的任务 · 待处理 ${overview?.task_pending ?? "—"} · 处理中 ${overview?.task_claimed ?? 0}`
+            : `团队任务 · 待处理 ${overview?.task_pending ?? "—"} · 已指派 ${overview?.task_assigned ?? 0}`}
         </p>
       </div>
 
-      {/* KPI 卡片 - 可点击跳转 */}
-      <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+      {/* 业务概览：方案A单行紧凑信息带 */}
+      <div
+        data-testid="business-overview-band"
+        className="grid overflow-hidden rounded-xl border border-teal-100/80 bg-gradient-to-r from-teal-50/70 via-background to-background shadow-sm sm:grid-cols-[7rem_repeat(3,minmax(0,1fr))]"
+      >
+        <div className="flex items-center border-b border-border/60 px-4 py-3 text-xs font-semibold text-muted-foreground sm:border-b-0">
+          业务概览
+        </div>
+
         <button
+          type="button"
+          data-testid="business-overview-item-total-sku"
           onClick={() => navigate("/types")}
-          className="text-left"
-          data-testid="kpi-total-sku"
+          className="group flex min-h-14 items-center justify-between gap-3 border-t border-border/60 px-4 py-2 text-left transition-colors hover:bg-teal-50/80 sm:border-l sm:border-t-0"
         >
-          <Card className="p-5 hover:shadow-md hover:border-primary/40 transition-all cursor-pointer">
-            <div className="flex items-center justify-between text-sm text-muted-foreground">
-              <span>在售 SKU 总数</span>
-              <Package className="w-4 h-4" />
-            </div>
-            <div className="text-2xl font-semibold mt-2 tabular-nums" data-testid="value-total-sku">{overview?.total_sku ?? "—"}</div>
-            <div className="text-xs text-muted-foreground mt-1">点击查看分类分布 →</div>
-          </Card>
+          <span className="flex min-w-0 items-center gap-3">
+            <span className="grid h-8 w-8 shrink-0 place-items-center rounded-lg bg-teal-100/70 text-teal-700">
+              <Package className="h-4 w-4" />
+            </span>
+            <span className="min-w-0">
+              <span className="block truncate text-[11px] text-muted-foreground">在售 SKU 总数</span>
+              <span className="mt-0.5 block text-lg font-semibold tabular-nums" data-testid="value-total-sku">
+                {overview?.total_sku ?? "—"}
+              </span>
+            </span>
+          </span>
+          <span className="text-sm text-teal-600 transition-transform group-hover:translate-x-0.5">›</span>
         </button>
 
         <button
+          type="button"
+          data-testid="business-overview-item-classified"
           onClick={() => navigate("/types")}
+          className="group flex min-h-14 items-center justify-between gap-3 border-t border-border/60 px-4 py-2 text-left transition-colors hover:bg-teal-50/80 sm:border-l sm:border-t-0"
+        >
+          <span className="flex min-w-0 items-center gap-3">
+            <span className="grid h-8 w-8 shrink-0 place-items-center rounded-lg bg-cyan-100/70 text-cyan-700">
+              <PieChartIcon className="h-4 w-4" />
+            </span>
+            <span className="min-w-0">
+              <span className="block truncate text-[11px] text-muted-foreground">本周已分类</span>
+              <span className="flex items-baseline gap-2">
+                <span className="mt-0.5 block text-lg font-semibold tabular-nums" data-testid="value-latest-week">
+                  {overview?.latest_week_classified ?? "—"}
+                </span>
+                <span className="truncate text-[10px] text-muted-foreground">
+                  {overview?.latest_week
+                    ? weekLabel(
+                        Number(overview.latest_week.split("-W")[0]),
+                        Number(overview.latest_week.split("-W")[1]),
+                      )
+                    : "—"}
+                </span>
+              </span>
+            </span>
+          </span>
+          <span className="text-sm text-teal-600 transition-transform group-hover:translate-x-0.5">›</span>
+        </button>
+
+        <button
+          type="button"
+          data-testid="business-overview-item-transitions"
+          onClick={() => navigate("/transitions")}
+          className="group flex min-h-14 items-center justify-between gap-3 border-t border-border/60 px-4 py-2 text-left transition-colors hover:bg-teal-50/80 sm:border-l sm:border-t-0"
+        >
+          <span className="flex min-w-0 items-center gap-3">
+            <span className="grid h-8 w-8 shrink-0 place-items-center rounded-lg bg-sky-100/70 text-sky-700">
+              <ArrowRightLeft className="h-4 w-4" />
+            </span>
+            <span className="min-w-0">
+              <span className="block truncate text-[11px] text-muted-foreground">累计流转</span>
+              <span className="mt-0.5 block text-lg font-semibold tabular-nums" data-testid="value-transitions">
+                {overview?.total_transitions ?? "—"}
+              </span>
+            </span>
+          </span>
+          <span className="text-sm text-teal-600 transition-transform group-hover:translate-x-0.5">›</span>
+        </button>
+      </div>
+
+      {/* 任务归属 KPI */}
+      <div data-testid="task-overview-grid" className="grid grid-cols-1 md:grid-cols-4 gap-4">
+        <button
+          onClick={() => {
+            setOwnerFilter(isOperator ? "mine" : "all");
+            setOwnerUsername("all");
+            setStatus("open");
+          }}
           className="text-left"
-          data-testid="kpi-latest-week"
+          data-testid="kpi-task-pending"
         >
           <Card className="p-5 hover:shadow-md hover:border-primary/40 transition-all cursor-pointer">
             <div className="flex items-center justify-between text-sm text-muted-foreground">
-              <span>本周已分类</span>
-              <PieChartIcon className="w-4 h-4" />
-            </div>
-            <div className="text-2xl font-semibold mt-2 tabular-nums" data-testid="value-latest-week">{overview?.latest_week_classified ?? "—"}</div>
-            <div className="text-xs text-muted-foreground mt-1">
-              {overview?.latest_week ? weekLabel(Number(overview.latest_week.split("-W")[0]), Number(overview.latest_week.split("-W")[1])) : "—"}
-            </div>
-          </Card>
-        </button>
-
-        <a href="#task-list" data-testid="kpi-task-pending" className="text-left" onClick={(e) => { e.preventDefault(); setStatus("open"); document.getElementById("task-list")?.scrollIntoView({ behavior: "smooth" }); }}>
-          <Card className="p-5 hover:shadow-md hover:border-primary/40 transition-all cursor-pointer">
-            <div className="flex items-center justify-between text-sm text-muted-foreground">
-              <span>待处理任务</span>
-              <ClipboardCheck className="w-4 h-4" />
+              <span>{isOperator ? "我的待处理" : "全部待处理"}</span>
+              <ClipboardList className="w-4 h-4" />
             </div>
             <div className="text-2xl font-semibold mt-2 tabular-nums text-amber-700" data-testid="value-task-pending">{overview?.task_pending ?? "—"}</div>
-            <div className="text-xs text-muted-foreground mt-1">已完成 {overview?.task_done ?? 0}</div>
+            <div className="text-xs text-muted-foreground mt-1">点击查看待处理任务 →</div>
           </Card>
-        </a>
+        </button>
 
         <button
-          onClick={() => navigate("/transitions")}
+          onClick={() => {
+            if (isOperator) {
+              setOwnerFilter("mine");
+              setStatus("in_progress");
+            } else {
+              setOwnerFilter("unassigned");
+              setStatus("ALL");
+            }
+            setOwnerUsername("all");
+          }}
           className="text-left"
-          data-testid="kpi-transitions"
+          data-testid={isOperator ? "kpi-my-in-progress" : "kpi-task-pool"}
         >
           <Card className="p-5 hover:shadow-md hover:border-primary/40 transition-all cursor-pointer">
             <div className="flex items-center justify-between text-sm text-muted-foreground">
-              <span>累计流转</span>
-              <ArrowRightLeft className="w-4 h-4" />
+              <span>{isOperator ? "我的处理中" : "任务池"}</span>
+              {isOperator ? <UserRoundCheck className="w-4 h-4" /> : <Inbox className="w-4 h-4" />}
             </div>
-            <div className="text-2xl font-semibold mt-2 tabular-nums" data-testid="value-transitions">{overview?.total_transitions ?? "—"}</div>
-            <div className="text-xs text-muted-foreground mt-1">点击查看迁移分析 →</div>
+            <div className="text-2xl font-semibold mt-2 tabular-nums text-blue-700">
+              {isOperator ? (overview?.task_claimed ?? "—") : (overview?.task_pool ?? "—")}
+            </div>
+            <div className="text-xs text-muted-foreground mt-1">点击查看对应任务 →</div>
+          </Card>
+        </button>
+
+        <button
+          type="button"
+          data-testid={isOperator ? "kpi-my-done" : "kpi-task-assigned"}
+          className="text-left"
+          onClick={() => {
+            if (isOperator) {
+              setOwnerFilter("mine");
+              setStatus("done");
+            } else {
+              setOwnerFilter("assigned");
+              setStatus("ALL");
+            }
+            setOwnerUsername("all");
+          }}
+        >
+          <Card className="p-5 hover:shadow-md hover:border-primary/40 transition-all cursor-pointer">
+            <div className="flex items-center justify-between text-sm text-muted-foreground">
+              <span>{isOperator ? "我的已完成" : "已指派"}</span>
+              <UserRoundCheck className="w-4 h-4" />
+            </div>
+            <div className="text-2xl font-semibold mt-2 tabular-nums text-emerald-700">
+              {isOperator ? (overview?.task_done ?? "—") : (overview?.task_assigned ?? "—")}
+            </div>
+            <div className="text-xs text-muted-foreground mt-1">点击查看对应任务 →</div>
+          </Card>
+        </button>
+
+        <button
+          onClick={() => {
+            if (isOperator) {
+              setOwnerFilter("unassigned");
+              setStatus("ALL");
+            } else {
+              setOwnerFilter("all");
+              setStatus("done");
+            }
+            setOwnerUsername("all");
+          }}
+          className="text-left"
+          data-testid={isOperator ? "kpi-task-pool" : "kpi-task-done"}
+        >
+          <Card className="p-5 hover:shadow-md hover:border-primary/40 transition-all cursor-pointer">
+            <div className="flex items-center justify-between text-sm text-muted-foreground">
+              <span>{isOperator ? "任务池" : "已完成"}</span>
+              {isOperator ? <Inbox className="w-4 h-4" /> : <ClipboardCheck className="w-4 h-4" />}
+            </div>
+            <div className="text-2xl font-semibold mt-2 tabular-nums">
+              {isOperator ? (overview?.task_pool ?? "—") : (overview?.task_done ?? "—")}
+            </div>
+            <div className="text-xs text-muted-foreground mt-1">点击查看对应任务 →</div>
           </Card>
         </button>
       </div>
@@ -526,26 +665,76 @@ export default function Workbench() {
           </div>
         </div>
 
-        {/* v1.7: admin 指派可见性与批量指派工具栏 */}
+        {isOperator && (
+          <div className="flex items-center gap-2 mb-3 rounded-md border border-border/60 bg-muted/30 px-3 py-2" data-testid="operator-scope-toolbar">
+            <span className="text-xs text-muted-foreground shrink-0">任务范围</span>
+            <div className="inline-flex rounded-md overflow-hidden border border-border">
+              {([
+                { key: "mine", label: "我的任务" },
+                { key: "unassigned", label: "任务池" },
+              ] as const).map((option) => (
+                <button
+                  key={option.key}
+                  type="button"
+                  onClick={() => {
+                    setOwnerFilter(option.key);
+                    setOwnerUsername("all");
+                  }}
+                  className={`px-4 h-8 text-xs transition-colors ${ownerFilter === option.key ? "bg-primary text-primary-foreground" : "bg-white text-foreground hover:bg-muted"}`}
+                  data-testid={`operator-scope-${option.key}`}
+                >
+                  {option.label}
+                </button>
+              ))}
+            </div>
+            <span className="text-xs text-muted-foreground">
+              {ownerFilter === "unassigned" ? "查看尚未分配的任务，可直接接手" : "只显示分配给我的任务"}
+            </span>
+          </div>
+        )}
+
+        {/* 主管任务归属与批量指派工具栏 */}
         {isAdmin && (
           <div className="flex items-center flex-wrap gap-2 mb-3 rounded-md border border-border/60 bg-muted/30 px-3 py-2" data-testid="admin-toolbar">
-            <span className="text-xs text-muted-foreground shrink-0">指派可见性</span>
+            <span className="text-xs text-muted-foreground shrink-0">任务归属</span>
             <div className="inline-flex rounded-md overflow-hidden border border-border">
               {([
                 { k: "all", label: "全部" },
                 { k: "unassigned", label: "任务池" },
                 { k: "assigned", label: "已指派" },
-                { k: "mine", label: "我指派的" },
               ] as const).map(o => (
                 <button
                   key={o.k}
                   type="button"
-                  onClick={() => setOwnerFilter(o.k)}
+                  onClick={() => {
+                    setOwnerFilter(o.k);
+                    setOwnerUsername("all");
+                  }}
                   className={`px-3 h-7 text-xs transition-colors ${ownerFilter === o.k ? "bg-primary text-primary-foreground" : "bg-white text-foreground hover:bg-muted"}`}
                   data-testid={`owner-filter-${o.k}`}
                 >{o.label}</button>
               ))}
             </div>
+
+            <Select
+              value={ownerUsername}
+              onValueChange={(value) => {
+                setOwnerUsername(value);
+                setOwnerFilter(value === "all" ? "all" : "assigned");
+              }}
+            >
+              <SelectTrigger className="h-7 w-[180px] text-xs" data-testid="select-task-owner">
+                <SelectValue placeholder="全部负责人" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">全部负责人</SelectItem>
+                {operatorOptions.map((operator) => (
+                  <SelectItem key={operator.username} value={operator.username}>
+                    {operator.display_name} · @{operator.username}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
 
             <span className="mx-2 text-muted-foreground/40">|</span>
 
@@ -710,6 +899,9 @@ export default function Workbench() {
             {tasks.map((t) => {
             const curStatus = String(t.status || "open").toLowerCase();
             const isPending = statusMut.isPending;
+            const isPoolTask = t.owner === null;
+            const isMyTask = t.owner === authUser?.username;
+            const canManageCurrentTask = isAdmin || isMyTask;
             return (
               <Card key={t.id} className={`p-4 hover:shadow-md transition-all h-full ${selectMode && selectedIds.has(t.id) ? "border-primary ring-2 ring-primary/30" : "hover:border-primary/40"}`} data-testid={`task-card-${t.sku}`}>
                 <div className="flex gap-3">
@@ -804,9 +996,13 @@ export default function Workbench() {
                         </span>
                         <span className="flex items-center gap-1.5">
                           {t.owner ? (
-                            <Badge className="bg-teal-50 text-teal-700 border-teal-200 hover:bg-teal-50 text-[10px] px-1.5 py-0 h-5" data-testid={`owner-badge-${t.sku}`}>
-                              <UserPlus className="w-3 h-3 mr-0.5" />{t.owner}
-                            </Badge>
+                            <span className="inline-flex items-center gap-1.5" data-testid={`owner-badge-${t.sku}`}>
+                              <Badge className="bg-teal-50 text-teal-700 border-teal-200 hover:bg-teal-50 text-[10px] px-1.5 py-0 h-5">
+                                <UserPlus className="w-3 h-3 mr-0.5" />
+                                负责人：{t.owner_display_name || t.owner}
+                              </Badge>
+                              <span className="text-[10px] text-muted-foreground">@{t.owner}</span>
+                            </span>
                           ) : (
                             <Badge className="bg-slate-100 text-slate-500 border-slate-200 hover:bg-slate-100 text-[10px] px-1.5 py-0 h-5" data-testid={`owner-badge-${t.sku}`}>任务池</Badge>
                           )}
@@ -860,15 +1056,35 @@ export default function Workbench() {
                           </DropdownMenuContent>
                         </DropdownMenu>
                       )}
-                      {curStatus === "open" && (
+                      {isOperator && isPoolTask && curStatus === "open" && (
+                        <Button size="sm" className="h-7 text-xs"
+                          disabled={isPending}
+                          onClick={() => statusMut.mutate({ id: t.id, next: "in_progress" })}
+                          data-testid={`btn-claim-${t.sku}`}
+                        >
+                          <PlayCircle className="w-3.5 h-3.5 mr-1" />接手
+                        </Button>
+                      )}
+                      {isOperator && isMyTask && curStatus === "open" && (
+                        <Button size="sm" className="h-7 text-xs"
+                          disabled={isPending}
+                          onClick={() => statusMut.mutate({ id: t.id, next: "in_progress" })}
+                          data-testid={`btn-start-${t.sku}`}
+                        >
+                          <PlayCircle className="w-3.5 h-3.5 mr-1" />开始处理
+                        </Button>
+                      )}
+                      {isAdmin && curStatus === "open" && (
                         <>
-                          <Button size="sm" variant="outline" className="h-7 text-xs"
-                            disabled={isPending}
-                            onClick={() => statusMut.mutate({ id: t.id, next: "in_progress" })}
-                            data-testid={`btn-claim-${t.sku}`}
-                          >
-                            <PlayCircle className="w-3.5 h-3.5 mr-1" />接手
-                          </Button>
+                          {t.owner && (
+                            <Button size="sm" variant="outline" className="h-7 text-xs"
+                              disabled={isPending}
+                              onClick={() => statusMut.mutate({ id: t.id, next: "in_progress" })}
+                              data-testid={`btn-start-${t.sku}`}
+                            >
+                              <PlayCircle className="w-3.5 h-3.5 mr-1" />开始处理
+                            </Button>
+                          )}
                           <Button size="sm" className="h-7 text-xs"
                             disabled={isPending}
                             onClick={() => statusMut.mutate({ id: t.id, next: "done" })}
@@ -878,7 +1094,7 @@ export default function Workbench() {
                           </Button>
                         </>
                       )}
-                      {curStatus === "in_progress" && (
+                      {canManageCurrentTask && curStatus === "in_progress" && (
                         <>
                           <Button size="sm" variant="outline" className="h-7 text-xs"
                             disabled={isPending}
@@ -896,7 +1112,7 @@ export default function Workbench() {
                           </Button>
                         </>
                       )}
-                      {curStatus === "done" && (
+                      {canManageCurrentTask && curStatus === "done" && (
                         <Button size="sm" variant="outline" className="h-7 text-xs"
                           disabled={isPending}
                           onClick={() => statusMut.mutate({ id: t.id, next: "open" })}

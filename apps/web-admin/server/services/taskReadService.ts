@@ -72,6 +72,7 @@ export async function loadTaskPageWithOptionalReadSnapshot(options: {
 type TaskReadDependencyOptions = {
   query: Query;
   filter: TaskFilterInput;
+  preparedFilter?: { sql: string; params: unknown[] };
   limit: number;
   offset: number;
   sort: string;
@@ -84,7 +85,7 @@ type TaskReadDependencyOptions = {
 export function createTaskReadDependencies(
   options: TaskReadDependencyOptions,
 ): TaskReadDependencies {
-  const filter = buildTaskFilter(options.filter);
+  const filter = options.preparedFilter ?? buildTaskFilter(options.filter);
 
   return {
     selectTaskPage: async (input) => {
@@ -109,11 +110,14 @@ export function createTaskReadDependencies(
                 t.priority, t.title, t.detail,
                 t.reason_summary AS reason_summary_raw,
                 t.expected_impact, t.status, t.owner,
+                owner_user.display_name AS owner_display_name,
                 t.due_date::text AS due_date,
                 t.created_at::text AS created_at,
                 NULLIF(mp.link, '') AS product_link,
                 s.season_tag, s.lifecycle, s.unit_cost_clp
            FROM business.ops_task t
+           LEFT JOIN business_ext.app_user_ext owner_user
+             ON owner_user.username = t.owner
            LEFT JOIN business.sku_master s ON s.sku = t.sku
            LEFT JOIN middleware.mkd_customer_product mp ON mp.sku = t.sku
            ${sort.joins}
