@@ -9,7 +9,7 @@ import {
 import { normalizeAiPayload } from "./payloadNormalizer";
 import type { Ai3aRepository, AiAnalysisRow } from "./repository";
 
-type AiAnalysisReader = Pick<
+export type AiAnalysisReader = Pick<
   Ai3aRepository,
   | "latestUsable"
   | "latestAttempt"

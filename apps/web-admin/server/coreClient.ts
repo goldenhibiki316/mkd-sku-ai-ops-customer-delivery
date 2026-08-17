@@ -27,10 +27,18 @@ export type RefreshSkuInput = {
   actorId: string;
 };
 
-export type RefreshSkuResponse = {
+export type CoreResponse = {
   status: string;
   request_id: string;
 } & Record<string, unknown>;
+
+export type RefreshSkuResponse = CoreResponse & {
+  status: 'success';
+  analysis_id: string;
+  analysis_status: 'valid' | 'incomplete';
+  model_name: string;
+  result: unknown;
+};
 
 export class CoreUnavailableError extends Error {
   constructor(message = 'proprietary core is unavailable') {
@@ -49,7 +57,7 @@ export class CoreProtocolError extends Error {
 export class CoreResponseError extends Error {
   constructor(
     readonly statusCode: number,
-    readonly response: RefreshSkuResponse,
+    readonly response: CoreResponse,
   ) {
     super(`proprietary core returned ${statusCode}`);
     this.name = 'CoreResponseError';
@@ -77,7 +85,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 }
 
-function parseRefreshSkuResponse(body: unknown): RefreshSkuResponse {
+function parseCoreResponse(body: unknown): CoreResponse {
   if (!isRecord(body)) throw new CoreProtocolError();
   const status = body.status;
   const requestId = body.request_id;
@@ -85,6 +93,31 @@ function parseRefreshSkuResponse(body: unknown): RefreshSkuResponse {
     throw new CoreProtocolError();
   }
   return { ...body, status, request_id: requestId };
+}
+
+function parseRefreshSkuSuccess(body: CoreResponse): RefreshSkuResponse {
+  const analysisId = body.analysis_id;
+  const analysisStatus = body.analysis_status;
+  const modelName = body.model_name;
+  if (
+    typeof analysisId !== 'string'
+    || !analysisId.trim()
+    || (analysisStatus !== 'valid' && analysisStatus !== 'incomplete')
+    || typeof modelName !== 'string'
+    || !modelName.trim()
+    || !Object.hasOwn(body, 'result')
+  ) {
+    throw new CoreProtocolError();
+  }
+  return {
+    ...body,
+    status: 'success',
+    request_id: body.request_id,
+    analysis_id: analysisId,
+    analysis_status: analysisStatus,
+    model_name: modelName,
+    result: body.result,
+  };
 }
 
 function defaultTransport(
@@ -169,14 +202,14 @@ export class CoreClient {
     if (!expectedStatus) {
       throw new CoreProtocolError('core returned an unapproved HTTP status');
     }
-    const parsed = parseRefreshSkuResponse(response.body);
+    const parsed = parseCoreResponse(response.body);
     if (parsed.status !== expectedStatus) {
       throw new CoreProtocolError('core HTTP status and response status disagree');
     }
     if (response.status !== 200) {
       throw new CoreResponseError(response.status, parsed);
     }
-    return parsed;
+    return parseRefreshSkuSuccess(parsed);
   }
 }
 

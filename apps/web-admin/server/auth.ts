@@ -1,25 +1,13 @@
 // v1.6 用户系统 —— session + auth 中间件 + 路由
-import type { Express, Request, Response, NextFunction } from "express";
+import type { Express } from "express";
 import session from "express-session";
 import connectPgSimple from "connect-pg-simple";
 import bcrypt from "bcryptjs";
 import { pool, q } from "./db";
+import { requireAdmin } from "./authMiddleware";
 
-// ============================================================
-// 类型
-// ============================================================
-export type AppUser = {
-  id: string;
-  username: string;
-  role: "admin" | "operator";
-  display_name: string;
-};
-
-declare module "express-session" {
-  interface SessionData {
-    user?: AppUser;
-  }
-}
+export { requireAdmin, requireAuth } from "./authMiddleware";
+export type { AppUser } from "./authMiddleware";
 
 // ============================================================
 // Session middleware —— connect-pg-simple + business_ext.app_session
@@ -54,25 +42,6 @@ export function createSessionMiddleware() {
       maxAge: 1000 * 60 * 60 * 24 * 7, // 7 天
     },
   });
-}
-
-// ============================================================
-// 中间件:要求已登录
-// ============================================================
-export function requireAuth(req: Request, res: Response, next: NextFunction) {
-  if (!req.session?.user) {
-    return res.status(401).json({ error: "未登录" });
-  }
-  next();
-}
-
-// 中间件:要求管理员
-export function requireAdmin(req: Request, res: Response, next: NextFunction) {
-  if (!req.session?.user) return res.status(401).json({ error: "未登录" });
-  if (req.session.user.role !== "admin") {
-    return res.status(403).json({ error: "仅运营主管可以执行此操作" });
-  }
-  next();
 }
 
 // ============================================================

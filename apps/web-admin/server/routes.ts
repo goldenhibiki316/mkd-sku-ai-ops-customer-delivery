@@ -19,8 +19,6 @@ import {
 import { handleTaskRouteError } from "./httpErrors";
 import {
   buildAiAnalysisResponse,
-  buildAiHistoryResponse,
-  normalizeStoredAnalysisRecord,
   toLegacyAiDetail,
 } from "./services/ai3a/analysisService";
 import { Ai3aRepository } from "./services/ai3a/repository";
@@ -49,12 +47,8 @@ import {
   loadReadModelFields,
 } from "./services/operatingFieldsSource";
 import { recordPhase } from "./requestContext";
-import {
-  CoreProtocolError,
-  CoreResponseError,
-  CoreUnavailableError,
-  createCoreClientFromEnv,
-} from "./coreClient";
+import { createCoreClientFromEnv } from "./coreClient";
+import { registerAiRoutes } from "./aiRoutes";
 import { getBuildVersion } from "./version";
 import { buildTaskFilter } from "./services/taskFilters";
 import {
@@ -726,66 +720,18 @@ export async function registerRoutes(
     }
   });
 
-  // ---------- AI 3A 统一读取 ----------
-  app.get("/api/skus/:sku/ai-analysis", requireAuth, async (req, res, next) => {
-    try {
-      res.json(await buildAiAnalysisResponse(
-        aiRepository,
-        routeParam(req.params.sku),
-        { includeHistory: false },
-      ));
-    } catch (error) {
-      next(error);
-    }
-  });
-
-  app.get("/api/skus/:sku/ai/history", requireAuth, async (req, res, next) => {
-    try {
-      res.json(await buildAiHistoryResponse(
-        aiRepository,
-        routeParam(req.params.sku),
-      ));
-    } catch (error) {
-      next(error);
-    }
-  });
-
-  app.get(
-    "/api/skus/:sku/ai/history/:analysisId",
-    requireAuth,
-    async (req, res, next) => {
-      try {
-        const row = await aiRepository.findUsableById(
-          routeParam(req.params.sku),
-          routeParam(req.params.analysisId),
-        );
-        if (!row) {
-          res.status(404).json({
-            error: {
-              code: "AI_HISTORY_NOT_FOUND",
-              message: "未找到该历史分析",
-              retryable: false,
-            },
-          });
-          return;
-        }
-        const normalized = normalizeStoredAnalysisRecord(row);
-        res.json({
-          analysis: normalized.payload,
-          meta: {
-            analysis_id: row.analysis_id,
-            analysis_status: normalized.status,
-            analysis_time: row.finished_at ?? row.created_at,
-            model_name: row.model_name,
-            iso_year: row.iso_year,
-            iso_week: row.iso_week,
-          },
-        });
-      } catch (error) {
-        next(error);
-      }
+  // ---------- AI 3A 统一读取与刷新 ----------
+  registerAiRoutes(app, {
+    repository: aiRepository,
+    coreClient,
+    skuExists: async (sku) => {
+      const existing = await qRead<{ sku: string }>(
+        "SELECT sku FROM business.sku_master WHERE sku = $1 LIMIT 1",
+        [sku],
+      );
+      return Boolean(existing[0]);
     },
-  );
+  });
 
   // ---------- SKU 详情拆分读取 ----------
   app.get("/api/skus/:sku/summary", requireAuth, async (req, res, next) => {
@@ -908,40 +854,6 @@ export async function registerRoutes(
       );
       res.json({ ok: true });
     } catch (error) {
-      next(error);
-    }
-  });
-
-  // ---------- AI 深度解析:刷新 ----------
-  app.post("/api/skus/:sku/ai-refresh", requireAuth, async (req, res, next) => {
-    try {
-      const sku = routeParam(req.params.sku).trim();
-      const existing = await qRead<{ sku: string }>(
-        "SELECT sku FROM business.sku_master WHERE sku = $1 LIMIT 1",
-        [sku],
-      );
-      if (!existing[0]) {
-        res.status(404).json({ error: "SKU 不存在" });
-        return;
-      }
-      const result = await coreClient.refreshSku({
-        sku,
-        requestId: req.requestContext?.requestId || "request-context-missing",
-        actorId: req.session.user!.id,
-      });
-      res.status(200).json(result);
-    } catch (error) {
-      if (error instanceof CoreResponseError) {
-        res.status(error.statusCode).json(error.response);
-        return;
-      }
-      if (error instanceof CoreUnavailableError || error instanceof CoreProtocolError) {
-        res.status(503).json({
-          status: "core_unavailable",
-          message: "AI 分析核心暂时不可用，历史分析仍可查看",
-        });
-        return;
-      }
       next(error);
     }
   });

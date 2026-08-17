@@ -26,6 +26,8 @@ test('refreshSku sends only protocol metadata and one SKU', async () => {
           status: 'success',
           request_id: 'req-1',
           analysis_id: 'analysis-1',
+          analysis_status: 'valid',
+          model_name: 'fixture-model',
           result: { schema_version: '3A.1' },
         },
       };
@@ -51,8 +53,53 @@ test('refreshSku sends only protocol metadata and one SKU', async () => {
     status: 'success',
     request_id: 'req-1',
     analysis_id: 'analysis-1',
+    analysis_status: 'valid',
+    model_name: 'fixture-model',
     result: { schema_version: '3A.1' },
   });
+});
+
+test('refreshSku rejects every incomplete or malformed HTTP 200 success body', async () => {
+  const {
+    CoreClient,
+    CoreProtocolError,
+  } = await import(moduleUrl.href);
+  const validBody: Record<string, unknown> = {
+    status: 'success',
+    request_id: 'req-1',
+    analysis_id: 'analysis-1',
+    analysis_status: 'valid',
+    model_name: 'fixture-model',
+    result: { schema_version: '3A.1' },
+  };
+  const cases: Array<[string, Record<string, unknown>]> = [
+    ['missing analysis_id', { ...validBody, analysis_id: undefined }],
+    ['invalid analysis_status', { ...validBody, analysis_status: 'generating' }],
+    ['missing model_name', { ...validBody, model_name: undefined }],
+    [
+      'missing result',
+      Object.fromEntries(
+        Object.entries(validBody).filter(([field]) => field !== 'result'),
+      ),
+    ],
+  ];
+
+  for (const [name, body] of cases) {
+    const client = new CoreClient({
+      socketPath: '/tmp/test.sock',
+      transport: async () => ({ status: 200, body }),
+    });
+
+    await assert.rejects(
+      () => client.refreshSku({
+        sku: 'SKU-1',
+        requestId: 'req-1',
+        actorId: 'user-1',
+      }),
+      CoreProtocolError,
+      name,
+    );
+  }
 });
 
 test('refreshSku rejects identifiers outside the public contract', async () => {

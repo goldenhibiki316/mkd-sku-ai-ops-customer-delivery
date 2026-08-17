@@ -5,6 +5,7 @@ import test from 'node:test';
 const rootPackageUrl = new URL('../../../../package.json', import.meta.url);
 const appPackageUrl = new URL('../../package.json', import.meta.url);
 const routesUrl = new URL('../../server/routes.ts', import.meta.url);
+const aiRoutesUrl = new URL('../../server/aiRoutes.ts', import.meta.url);
 const coreClientUrl = new URL('../../server/coreClient.ts', import.meta.url);
 const workbenchUrl = new URL('../../client/src/pages/Workbench.tsx', import.meta.url);
 const taskFiltersUrl = new URL('../../server/services/taskFilters.ts', import.meta.url);
@@ -54,9 +55,10 @@ test('customer delivery is rebased onto web admin v2.1.8 public task surface', a
 
 test('v2.1.8 customer delivery still exposes only the public core contract', async () => {
   const routes = await mustRead(routesUrl);
+  const aiRoutes = await mustRead(aiRoutesUrl);
   const coreClient = await mustRead(coreClientUrl);
 
-  assert.match(routes, /coreClient\.refreshSku/);
+  assert.match(aiRoutes, /coreClient\.refreshSku/);
   assert.match(coreClient, /sku:\s*requiredIdentifier\(input\.sku/);
   assert.match(coreClient, /request_id:\s*requiredIdentifier\(input\.requestId/);
   assert.match(coreClient, /actor_id:\s*requiredIdentifier\(input\.actorId/);
@@ -72,6 +74,7 @@ test('v2.1.8 customer delivery still exposes only the public core contract', asy
     ['sourceMapping', 'URL'].join(''),
   ]) {
     assert.equal(routes.includes(forbidden), false, `routes leaked ${forbidden}`);
+    assert.equal(aiRoutes.includes(forbidden), false, `aiRoutes leaked ${forbidden}`);
     assert.equal(coreClient.includes(forbidden), false, `coreClient leaked ${forbidden}`);
   }
 });

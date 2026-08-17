@@ -3,6 +3,7 @@ import { access, readFile } from 'node:fs/promises';
 import test from 'node:test';
 
 const routesUrl = new URL('../../server/routes.ts', import.meta.url);
+const aiRoutesUrl = new URL('../../server/aiRoutes.ts', import.meta.url);
 const repositoryUrl = new URL(
   '../../server/services/ai3a/repository.ts',
   import.meta.url,
@@ -19,6 +20,8 @@ test('public routes preserve approved APIs and delegate refresh to the local cor
   if (!routesExist) return;
 
   const routes = await readFile(routesUrl, 'utf8');
+  const aiRoutes = await readFile(aiRoutesUrl, 'utf8');
+  const apiSurface = `${routes}\n${aiRoutes}`;
   for (const endpoint of [
     '/api/health',
     '/api/overview',
@@ -32,9 +35,9 @@ test('public routes preserve approved APIs and delegate refresh to the local cor
     '/api/skus/:sku/ai-refresh',
     '/api/transitions',
   ]) {
-    assert.equal(routes.includes(endpoint), true, `missing endpoint ${endpoint}`);
+    assert.equal(apiSurface.includes(endpoint), true, `missing endpoint ${endpoint}`);
   }
-  assert.match(routes, /coreClient\.refreshSku/);
+  assert.match(aiRoutes, /coreClient\.refreshSku/);
 
   const forbidden = [
     ['SOP', 'V3', 'MATRIX'].join('_'),
@@ -46,7 +49,7 @@ test('public routes preserve approved APIs and delegate refresh to the local cor
     ['ruleTask', 'Generator'].join(''),
   ];
   for (const marker of forbidden) {
-    assert.equal(routes.includes(marker), false, `protected marker ${marker}`);
+    assert.equal(apiSurface.includes(marker), false, `protected marker ${marker}`);
   }
 });
 
@@ -58,7 +61,7 @@ test('AI history repository is query-only', async () => {
 });
 
 test('AI refresh preserves approved core statuses and reserves 503 for transport failures', async () => {
-  const routes = await readFile(routesUrl, 'utf8');
+  const routes = await readFile(aiRoutesUrl, 'utf8');
 
   assert.match(routes, /CoreResponseError/);
   assert.match(routes, /error instanceof CoreResponseError/);
