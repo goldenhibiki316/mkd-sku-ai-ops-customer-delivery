@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { createHmac } from 'node:crypto';
 import { once } from 'node:events';
-import { access, mkdtemp, rm } from 'node:fs/promises';
+import { access, mkdtemp, readFile, rm } from 'node:fs/promises';
 import { createServer, type Server } from 'node:http';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -99,6 +99,23 @@ function assertAcceptedAiPayload(parsed: {
   assert.equal(normalized.status, parsed.analysis_status);
   assert.equal(aiPayloadSchema.safeParse(normalized.payload).success, true);
   return normalized.payload;
+}
+
+function assertRecord(value: unknown): asserts value is Record<string, unknown> {
+  assert.equal(Boolean(value) && typeof value === 'object' && !Array.isArray(value), true);
+}
+
+function assertResultMatchesCapturedDecision(resultValue: unknown, decisionValue: unknown) {
+  assertRecord(resultValue);
+  assertRecord(decisionValue);
+  assertRecord(decisionValue.risk);
+  assert.equal(resultValue.sop_v3_type, decisionValue.classification_zh);
+  assert.deepEqual(resultValue.trigger_reasons, decisionValue.trigger_reasons);
+  assert.equal(resultValue.risk_level, decisionValue.risk.level);
+  assert.deepEqual(resultValue.risk_tags, decisionValue.risk.tags);
+  assert.deepEqual(resultValue.diagnosis, decisionValue.evidence);
+  assert.deepEqual(resultValue.actions, decisionValue.actions);
+  assert.deepEqual(resultValue.missing_inputs, decisionValue.missing_inputs);
 }
 
 function syntheticStoredAnalysis(): AiAnalysisRow {
@@ -236,6 +253,9 @@ test(
       const normalized = assertAcceptedAiPayload(parsed);
       assert.equal(normalized.schema_version, '3A.1');
       assert.equal(normalized.conclusion.text, 'fixture-ok');
+      const capture = JSON.parse(await readFile(captureOutput, 'utf8')) as unknown;
+      assertRecord(capture);
+      assertResultMatchesCapturedDecision(parsed.result, capture.decision);
 
       const coreExit = once(core, 'exit');
       assert.equal(core.kill('SIGTERM'), true);
@@ -276,6 +296,14 @@ test(
       const recoveredParsed = await parseAiRefreshResponse(recovered.clone());
       assert.equal(recoveredParsed.analysis_status, 'valid');
       assert.equal(assertAcceptedAiPayload(recoveredParsed).conclusion.text, 'fixture-ok');
+      const restartCapture = JSON.parse(
+        await readFile(restartCapturePath, 'utf8'),
+      ) as unknown;
+      assertRecord(restartCapture);
+      assertResultMatchesCapturedDecision(
+        recoveredParsed.result,
+        restartCapture.decision,
+      );
     } finally {
       if (core.exitCode === null) {
         const coreExit = once(core, 'exit');

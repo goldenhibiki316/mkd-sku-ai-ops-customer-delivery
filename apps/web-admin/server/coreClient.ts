@@ -1,5 +1,9 @@
 import { request as httpRequest } from 'node:http';
 
+import {
+  generatedAnalysisResultSchema,
+  type GeneratedAnalysisResult,
+} from './services/ai3a/generatedResultSchema';
 import { normalizeAiPayload } from './services/ai3a/payloadNormalizer';
 
 export type CoreTransportRequest = {
@@ -43,7 +47,7 @@ export type RefreshSkuResponse = CoreResponse & {
   analysis_id: string;
   analysis_status: 'valid' | 'incomplete';
   model_name: string;
-  result: unknown;
+  result: GeneratedAnalysisResult;
 };
 
 export class CoreUnavailableError extends Error {
@@ -131,13 +135,16 @@ function parseRefreshSkuSuccess(
     || (analysisStatus !== 'valid' && analysisStatus !== 'incomplete')
     || typeof modelName !== 'string'
     || !modelName.trim()
-    || !isRecord(result)
-    || result.schema_version !== '3A.1'
   ) {
     throw new CoreProtocolError();
   }
+  const parsedResult = generatedAnalysisResultSchema.safeParse(result);
+  if (!parsedResult.success) {
+    throw new CoreProtocolError('core result does not satisfy the strict 3A.1 contract');
+  }
+  const safeResult = parsedResult.data;
   try {
-    const normalized = normalizeAiPayload(result, {
+    const normalized = normalizeAiPayload(safeResult, {
       source: 'generated',
       modelName: modelName.trim(),
       promptVersion: null,
@@ -155,7 +162,7 @@ function parseRefreshSkuSuccess(
     analysis_id: analysisId.trim(),
     analysis_status: analysisStatus,
     model_name: modelName.trim(),
-    result,
+    result: safeResult,
   };
 }
 
