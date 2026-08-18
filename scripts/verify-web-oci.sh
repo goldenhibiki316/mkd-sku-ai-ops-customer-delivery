@@ -98,6 +98,7 @@ jq -e --arg os "${expected_os}" --arg arch "${expected_architecture}" \
   '.os == $os and .architecture == $arch' "${config_blob}" >/dev/null
 if ! jq -e '
   .config.User == "65532:65532"
+  and .config.WorkingDir == "/app"
   and .config.Entrypoint == ["/nodejs/bin/node"]
   and .config.Cmd == ["dist/index.cjs"]
   and .config.ArgsEscaped == true

@@ -94,6 +94,7 @@ async function writeOciFixture(
       ExposedPorts: { '8080/tcp': {} },
       Labels: expectedLabels(),
       StopSignal: 'SIGTERM',
+      WorkingDir: '/app',
       ...configOverrides,
     },
   }));
@@ -295,12 +296,58 @@ test('Web OCI build binds the checked-out commit and tree into image labels', as
   );
   assert.match(
     script,
-    /--build-arg "WEB_SOURCE_TREE=\$\{actual_web_source_tree\}"/u,
+    /--build-arg "WEB_SOURCE_TREE=\$\{snapshot_tree\}"/u,
   );
   assert.match(
     script,
-    /verify-web-oci\.sh"[\s\S]+"\$\{web_commit_sha\}"[\s\S]+"\$\{web_source_tree\}"/u,
+    /verify-web-oci\.sh"[\s\S]+"\$\{snapshot_commit\}"[\s\S]+"\$\{snapshot_tree\}"/u,
   );
+});
+
+test('Web OCI build freezes the verified commit tree into a private context', async () => {
+  const script = await mustRead('scripts/build-web-oci.sh');
+  const buildArchive = script.slice(
+    script.indexOf('build_archive()'),
+    script.indexOf('build_archive linux/amd64'),
+  );
+
+  assert.match(script, /mktemp -d/u);
+  assert.match(script, /chmod 700 "\$\{temporary_root\}"/u);
+  assert.match(script, /git -C "\$\{repo_root\}" ls-tree -r -z/u);
+  assert.match(
+    script,
+    /git -C "\$\{repo_root\}" archive --format=tar --output="\$\{source_archive\}" "\$\{actual_web_commit\}"/u,
+  );
+  assert.match(script, /git get-tar-commit-id/u);
+  assert.match(script, /unsupported Git tree entry/u);
+  assert.match(script, /unsafe Web OCI snapshot member/u);
+  assert.match(
+    script,
+    /tar -xf "\$\{source_archive\}" -C "\$\{build_context\}"/u,
+  );
+  assert.match(script, /chmod -R a-w "\$\{build_context\}"/u);
+  assert.match(script, /snapshot_digest/u);
+  assert.match(script, /trap cleanup/u);
+  assert.equal(
+    buildArchive.match(/verify_snapshot/gu)?.length,
+    2,
+    'each platform build must verify the frozen snapshot before and after use',
+  );
+  assert.doesNotMatch(buildArchive, /verify_source_identity/u);
+  assert.match(
+    buildArchive,
+    /--build-arg "WEB_COMMIT_SHA=\$\{snapshot_commit\}"/u,
+  );
+  assert.match(
+    buildArchive,
+    /--build-arg "WEB_SOURCE_TREE=\$\{snapshot_tree\}"/u,
+  );
+  assert.match(
+    buildArchive,
+    /--file "\$\{build_context\}\/container\/web\/Containerfile"/u,
+  );
+  assert.match(buildArchive, /\n    "\$\{build_context\}"/u);
+  assert.doesNotMatch(buildArchive, /"\$\{repo_root\}"/u);
 });
 
 test('Web OCI Containerfile defines the exact runtime config contract', async () => {
@@ -321,7 +368,7 @@ test('Web OCI public runtime contract enforces least privilege', async () => {
     read_only_root: true,
     cap_drop: ['ALL'],
     security_opt: ['no-new-privileges'],
-    tmpfs: ['/tmp:rw,noexec,nosuid,size=16m'],
+    tmpfs: ['/tmp:rw,noexec,nosuid,nodev,size=16m,mode=1777'],
     readonly_config_mount: '/run/secrets/mkd-web.env',
     socket_mount: '/run/mkd-core',
     health_path: '/api/health',
@@ -474,6 +521,26 @@ test('Web OCI verifier rejects a missing stop signal', async (context) => {
 test('Web OCI verifier rejects a wrong stop signal', async (context) => {
   const result = await verifyFixture(context, {
     configOverrides: { StopSignal: 'SIGKILL' },
+  });
+  if (!result) return;
+
+  assert.notEqual(result.status, 0, result.stdout);
+  assert.match(result.stderr, /runtime config contract does not match/u);
+});
+
+test('Web OCI verifier rejects a missing working directory', async (context) => {
+  const result = await verifyFixture(context, {
+    configOverrides: { WorkingDir: undefined },
+  });
+  if (!result) return;
+
+  assert.notEqual(result.status, 0, result.stdout);
+  assert.match(result.stderr, /runtime config contract does not match/u);
+});
+
+test('Web OCI verifier rejects a wrong working directory', async (context) => {
+  const result = await verifyFixture(context, {
+    configOverrides: { WorkingDir: '/tmp' },
   });
   if (!result) return;
 

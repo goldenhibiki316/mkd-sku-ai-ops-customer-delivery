@@ -41,6 +41,14 @@ fi
 
 actual_web_commit=
 actual_web_source_tree=
+temporary_parent=
+temporary_root=
+source_archive=
+build_context=
+source_archive_digest=
+snapshot_commit=
+snapshot_tree=
+snapshot_digest=
 verify_source_identity() {
   actual_web_commit=$(git -C "${repo_root}" rev-parse HEAD)
   actual_web_source_tree=$(git -C "${repo_root}" rev-parse 'HEAD^{tree}')
@@ -58,9 +66,128 @@ verify_source_identity() {
   fi
 }
 
+cleanup() {
+  if [[ -z "${temporary_root}" || ! -d "${temporary_root}" ]]; then
+    return 0
+  fi
+  case "${temporary_root}" in
+    "${temporary_parent}"/mkd-web-build.*) ;;
+    *)
+      printf 'refusing to clean unexpected temporary path: %s\n' "${temporary_root}" >&2
+      return 1
+      ;;
+  esac
+  chmod -R u+w "${temporary_root}" 2>/dev/null || true
+  rm -rf -- "${temporary_root}"
+  temporary_root=
+}
+trap cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+validate_snapshot_tree() {
+  local entry
+  local metadata
+  local mode
+  local object_type
+  local source_path
+  while IFS= read -r -d '' entry; do
+    if [[ "${entry}" != *$'\t'* ]]; then
+      printf 'invalid Git tree entry in Web OCI source snapshot\n' >&2
+      exit 65
+    fi
+    metadata=${entry%%$'\t'*}
+    source_path=${entry#*$'\t'}
+    mode=${metadata%% *}
+    metadata=${metadata#* }
+    object_type=${metadata%% *}
+    if [[ "${object_type}" != blob \
+      || ( "${mode}" != 100644 && "${mode}" != 100755 ) ]]; then
+      printf 'unsupported Git tree entry for Web OCI snapshot: %s\n' "${source_path}" >&2
+      exit 65
+    fi
+    if [[ -z "${source_path}" \
+      || "${source_path}" == /* \
+      || "/${source_path}/" == *'/../'* \
+      || "/${source_path}/" == *'/./'* \
+      || "${source_path}" == *$'\n'* \
+      || "${source_path}" == *$'\r'* ]]; then
+      printf 'unsafe Git path in Web OCI snapshot: %s\n' "${source_path}" >&2
+      exit 65
+    fi
+  done < <(git -C "${repo_root}" ls-tree -r -z "${actual_web_commit}")
+}
+
+calculate_snapshot_digest() {
+  tar -cf - -C "${build_context}" . | shasum -a 256 | awk '{print $1}'
+}
+
+verify_snapshot() {
+  local actual_archive_digest
+  local actual_snapshot_digest
+  if [[ "${snapshot_commit}" != "${web_commit_sha}" \
+    || "${snapshot_tree}" != "${web_source_tree}" ]]; then
+    printf 'Web OCI snapshot identity drift detected\n' >&2
+    exit 65
+  fi
+  actual_archive_digest=$(shasum -a 256 "${source_archive}" | awk '{print $1}')
+  actual_snapshot_digest=$(calculate_snapshot_digest)
+  if [[ "${actual_archive_digest}" != "${source_archive_digest}" \
+    || "${actual_snapshot_digest}" != "${snapshot_digest}" ]]; then
+    printf 'Web OCI source snapshot content drift detected\n' >&2
+    exit 65
+  fi
+}
+
 verify_source_identity
 
-source_date_epoch=$(git -C "${repo_root}" show -s --format=%ct "${actual_web_commit}")
+temporary_parent=$(cd "${TMPDIR:-/tmp}" && pwd -P)
+temporary_root=$(mktemp -d "${temporary_parent}/mkd-web-build.XXXXXXXX")
+chmod 700 "${temporary_root}"
+source_archive="${temporary_root}/source.tar"
+build_context="${temporary_root}/context"
+mkdir -m 700 "${build_context}"
+
+validate_snapshot_tree
+git -C "${repo_root}" archive --format=tar --output="${source_archive}" "${actual_web_commit}"
+chmod 400 "${source_archive}"
+snapshot_commit=$(git get-tar-commit-id < "${source_archive}")
+snapshot_tree=$(git -C "${repo_root}" rev-parse "${snapshot_commit}^{tree}")
+if [[ "${snapshot_commit}" != "${actual_web_commit}" \
+  || "${snapshot_tree}" != "${actual_web_source_tree}" ]]; then
+  printf 'Git archive identity does not match the verified Web OCI source\n' >&2
+  exit 65
+fi
+source_archive_digest=$(shasum -a 256 "${source_archive}" | awk '{print $1}')
+
+while IFS= read -r member <&3 && IFS= read -r verbose_member <&4; do
+  normalized=${member#./}
+  member_type=${verbose_member:0:1}
+  if [[ -z "${normalized}" \
+    || "${normalized}" == /* \
+    || "/${normalized}/" == *'/../'* \
+    || "/${normalized}/" == *'/./'* ]]; then
+    printf 'unsafe Web OCI snapshot member: %s\n' "${member}" >&2
+    exit 65
+  fi
+  if [[ "${member_type}" != - && "${member_type}" != d ]]; then
+    printf 'unsupported Web OCI snapshot member type: %s\n' "${member}" >&2
+    exit 65
+  fi
+done 3< <(tar -tf "${source_archive}") 4< <(tar -tvf "${source_archive}")
+
+tar -xf "${source_archive}" -C "${build_context}"
+chmod -R a-w "${build_context}"
+snapshot_digest=$(calculate_snapshot_digest)
+if [[ ! "${source_archive_digest}" =~ ^[0-9a-f]{64}$ \
+  || ! "${snapshot_digest}" =~ ^[0-9a-f]{64}$ ]]; then
+  printf 'Web OCI snapshot digest calculation failed\n' >&2
+  exit 65
+fi
+verify_snapshot
+
+source_date_epoch=$(git -C "${repo_root}" show -s --format=%ct "${snapshot_commit}")
 web_branch=$(git -C "${repo_root}" branch --show-current)
 if [[ ! "${source_date_epoch}" =~ ^[0-9]{9,12}$ ]]; then
   printf 'SOURCE_DATE_EPOCH could not be resolved from the source commit\n' >&2
@@ -74,7 +201,7 @@ fi
   npm test
   npm run check --prefix apps/web-admin
   npm run test:customer --prefix apps/web-admin
-  APP_COMMIT_SHA="${web_commit_sha}" \
+  APP_COMMIT_SHA="${snapshot_commit}" \
     APP_BRANCH="${web_branch}" \
     SOURCE_DATE_EPOCH="${source_date_epoch}" \
     npm run build --prefix apps/web-admin
@@ -90,7 +217,7 @@ build_archive() {
   local archive="${output_dir}/mkd-web-linux-${architecture}.oci.tar"
   local partial="${archive}.partial"
 
-  verify_source_identity
+  verify_snapshot
 
   "${docker_bin}" buildx build \
     --platform "${platform}" \
@@ -98,14 +225,15 @@ build_archive() {
     --sbom=false \
     --build-arg "NODE_BUILD_IMAGE=${node_build_image}" \
     --build-arg "NODE_RUNTIME_IMAGE=${node_runtime_image}" \
-    --build-arg "WEB_COMMIT_SHA=${actual_web_commit}" \
-    --build-arg "WEB_SOURCE_TREE=${actual_web_source_tree}" \
+    --build-arg "WEB_COMMIT_SHA=${snapshot_commit}" \
+    --build-arg "WEB_SOURCE_TREE=${snapshot_tree}" \
     --build-arg "WEB_BRANCH=${web_branch}" \
     --build-arg "SOURCE_DATE_EPOCH=${source_date_epoch}" \
     --tag "mkd-web:2.1.8-customer.1-${architecture}" \
     --output "type=oci,dest=${partial}" \
-    --file "${repo_root}/container/web/Containerfile" \
-    "${repo_root}"
+    --file "${build_context}/container/web/Containerfile" \
+    "${build_context}"
+  verify_snapshot
   mv -- "${partial}" "${archive}"
 }
 
@@ -123,13 +251,13 @@ build_archive linux/arm64 arm64
   "${output_dir}/mkd-web-linux-amd64.oci.tar" \
   linux/amd64 \
   "${output_dir}/SHA256SUMS" \
-  "${web_commit_sha}" \
-  "${web_source_tree}"
+  "${snapshot_commit}" \
+  "${snapshot_tree}"
 "${repo_root}/scripts/verify-web-oci.sh" \
   "${output_dir}/mkd-web-linux-arm64.oci.tar" \
   linux/arm64 \
   "${output_dir}/SHA256SUMS" \
-  "${web_commit_sha}" \
-  "${web_source_tree}"
+  "${snapshot_commit}" \
+  "${snapshot_tree}"
 
 printf 'Web OCI archives and SHA256SUMS created under %s\n' "${output_dir}"

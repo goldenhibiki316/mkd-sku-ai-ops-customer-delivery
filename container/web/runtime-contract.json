@@ -10,7 +10,7 @@
     "no-new-privileges"
   ],
   "tmpfs": [
-    "/tmp:rw,noexec,nosuid,size=16m"
+    "/tmp:rw,noexec,nosuid,nodev,size=16m,mode=1777"
   ],
   "readonly_config_mount": "/run/secrets/mkd-web.env",
   "socket_mount": "/run/mkd-core",
