@@ -24,9 +24,15 @@ RUN case "${WEB_COMMIT_SHA}" in \
     && npm run check --prefix apps/web-admin \
     && npm run test:customer --prefix apps/web-admin \
     && APP_COMMIT_SHA="${WEB_COMMIT_SHA}" APP_BRANCH="${WEB_BRANCH}" SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH}" npm run build --prefix apps/web-admin \
-    && npm prune --omit=dev --ignore-scripts --prefix apps/web-admin \
-    && find apps/web-admin/node_modules -type f -name '*.map' -delete \
-    && ! find apps/web-admin/dist apps/web-admin/node_modules -type f -name '*.map' -print -quit | grep -q .
+    && mkdir -p /runtime \
+    && cp apps/web-admin/package.json apps/web-admin/package-lock.json /runtime/ \
+    && npm ci --omit=dev --ignore-scripts --prefix /runtime \
+    && find /runtime/node_modules -type f -iname 'README*' -delete \
+    && find /runtime/node_modules -type f -name '*.map' -delete \
+    && test ! -d /runtime/node_modules/tsx \
+    && test ! -d /runtime/node_modules/typescript \
+    && test ! -d /runtime/node_modules/@types \
+    && ! find apps/web-admin/dist /runtime/node_modules -type f -name '*.map' -print -quit | grep -q .
 
 FROM ${NODE_RUNTIME_IMAGE}
 
@@ -45,8 +51,8 @@ ENV PORT=8080
 ENV DOTENV_CONFIG_PATH=/run/secrets/mkd-web.env
 
 COPY --from=build --chown=65532:65532 /src/apps/web-admin/dist ./dist
-COPY --from=build --chown=65532:65532 /src/apps/web-admin/node_modules ./node_modules
-COPY --from=build --chown=65532:65532 /src/apps/web-admin/package.json ./package.json
+COPY --from=build --chown=65532:65532 /runtime/node_modules ./node_modules
+COPY --from=build --chown=65532:65532 /runtime/package.json ./package.json
 
 USER 65532:65532
 EXPOSE 8080

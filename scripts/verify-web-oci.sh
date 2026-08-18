@@ -14,7 +14,7 @@ if [[ "${expected_platform}" != linux/amd64 && "${expected_platform}" != linux/a
   printf 'unsupported expected platform: %s\n' "${expected_platform}" >&2
   exit 64
 fi
-for command_name in jq shasum tar; do
+for command_name in grep jq shasum strings tar; do
   command -v "${command_name}" >/dev/null 2>&1 || {
     printf 'required verifier command is unavailable: %s\n' "${command_name}" >&2
     exit 69
@@ -104,6 +104,16 @@ jq -e '
 ' "${contract_file}" >/dev/null
 
 layer_count=0
+marker_sop_matrix='SOP''_V3_MATRIX'
+marker_official_rules='OFFICIAL''_RULES_DIGEST'
+marker_ads_sop='ADS''_PROMOTION_SOP'
+marker_history_sop='LEARNED''_FROM_HISTORY_SOP'
+marker_rule_task='ruleTask''Generator'
+marker_metrics_sql='01''_refresh_metrics.sql'
+marker_classification_sql='02''_refresh_classification.sql'
+marker_prompt_role='你是美客多智利站''专属运营顾问'
+marker_prompt_structure='严格依以下结构''输出'
+forbidden_content_pattern="/Users/leo/|CodexWorking|tmp/worktrees|/src/apps/web-admin|${marker_sop_matrix}|${marker_official_rules}|${marker_ads_sop}|${marker_history_sop}|${marker_rule_task}|${marker_metrics_sql}|${marker_classification_sql}|${marker_prompt_role}|${marker_prompt_structure}|-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----|(ghp|gho|ghs|ghu|github_pat)_[A-Za-z0-9_]{20,}|sk-[A-Za-z0-9_-]{20,}|(AKIA|LTAI)[A-Z0-9]{12,}|(PGPASSWORD|SESSION_SECRET|AI_API_KEY|MODEL_API_KEY)=[^[:space:]#][^[:space:]]*|postgres(ql)?://[^:[:space:]]+:[^@[:space:]]+@"
 while IFS= read -r layer_digest; do
   layer_blob=$(digest_blob "${layer_digest}")
   [[ -f "${layer_blob}" ]] || { printf 'layer blob is missing\n' >&2; exit 66; }
@@ -125,6 +135,16 @@ while IFS= read -r layer_digest; do
       exit 66
     fi
   done < <(tar -tf "${layer_blob}")
+
+  layer_strings="${temporary_root}/layer-$((layer_count + 1)).strings"
+  if ! tar -xOf "${layer_blob}" 2>/dev/null | strings -a > "${layer_strings}"; then
+    printf 'OCI layer content extraction failed\n' >&2
+    exit 66
+  fi
+  if grep -aEq "${forbidden_content_pattern}" "${layer_strings}"; then
+    printf 'forbidden Web OCI layer content detected in layer %s\n' "$((layer_count + 1))" >&2
+    exit 66
+  fi
   layer_count=$((layer_count + 1))
 done < <(jq -r '.layers[].digest' "${manifest_blob}")
 
