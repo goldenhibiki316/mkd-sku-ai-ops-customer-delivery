@@ -6,6 +6,7 @@ FROM ${NODE_BUILD_IMAGE} AS build
 WORKDIR /src
 
 ARG WEB_COMMIT_SHA
+ARG WEB_SOURCE_TREE
 ARG WEB_BRANCH=feat/customer-delivery-b2splus
 ARG SOURCE_DATE_EPOCH
 
@@ -14,6 +15,10 @@ COPY . .
 RUN case "${WEB_COMMIT_SHA}" in \
       [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;; \
       *) echo 'WEB_COMMIT_SHA must be 40 lowercase hexadecimal characters' >&2; exit 64 ;; \
+    esac \
+    && case "${WEB_SOURCE_TREE}" in \
+      [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;; \
+      *) echo 'WEB_SOURCE_TREE must be 40 lowercase hexadecimal characters' >&2; exit 64 ;; \
     esac \
     && case "${SOURCE_DATE_EPOCH}" in \
       ''|*[!0-9]*) echo 'SOURCE_DATE_EPOCH must contain decimal seconds' >&2; exit 64 ;; \
@@ -27,6 +32,7 @@ RUN case "${WEB_COMMIT_SHA}" in \
     && mkdir -p /runtime \
     && cp container/web/runtime/package.json container/web/runtime/package-lock.json /runtime/ \
     && npm ci --omit=dev --ignore-scripts --prefix /runtime \
+    && rm -rf /runtime/node_modules/.bin \
     && find /runtime/node_modules -type f -iname 'README*' -delete \
     && find /runtime/node_modules -type f -name '*.map' -delete \
     && test ! -d /runtime/node_modules/tsx \
@@ -37,12 +43,12 @@ RUN case "${WEB_COMMIT_SHA}" in \
 FROM ${NODE_RUNTIME_IMAGE}
 
 ARG WEB_COMMIT_SHA
-ARG SOURCE_DATE_EPOCH
+ARG WEB_SOURCE_TREE
 
 LABEL org.opencontainers.image.title="mkd-customer-ops-web" \
       org.opencontainers.image.version="2.1.8-customer.1" \
       org.opencontainers.image.revision="${WEB_COMMIT_SHA}" \
-      org.opencontainers.image.created="${SOURCE_DATE_EPOCH}"
+      com.leo.mkd.source-tree="${WEB_SOURCE_TREE}"
 
 WORKDIR /app
 
@@ -55,6 +61,7 @@ COPY --from=build --chown=65532:65532 /runtime/node_modules ./node_modules
 COPY --from=build --chown=65532:65532 /runtime/package.json ./package.json
 
 USER 65532:65532
-EXPOSE 8080
+EXPOSE 8080/tcp
+STOPSIGNAL SIGTERM
 ENTRYPOINT ["/nodejs/bin/node"]
 CMD ["dist/index.cjs"]

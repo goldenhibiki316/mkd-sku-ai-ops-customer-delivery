@@ -4,14 +4,24 @@ set -euo pipefail
 archive=${1:-}
 expected_platform=${2:-}
 sums_file=${3:-}
+expected_commit=${4:-}
+expected_tree=${5:-}
 contract_file=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)/container/web/runtime-contract.json
 
-if [[ ! -f "${archive}" || ! -f "${sums_file}" || ! -f "${contract_file}" ]]; then
-  printf 'usage: %s <oci-archive> <linux/amd64|linux/arm64> <SHA256SUMS>\n' "$0" >&2
+if [[ "$#" -ne 5 || ! -f "${archive}" || ! -f "${sums_file}" || ! -f "${contract_file}" ]]; then
+  printf 'usage: %s <oci-archive> <linux/amd64|linux/arm64> <SHA256SUMS> <expected-commit> <expected-tree>\n' "$0" >&2
   exit 64
 fi
 if [[ "${expected_platform}" != linux/amd64 && "${expected_platform}" != linux/arm64 ]]; then
   printf 'unsupported expected platform: %s\n' "${expected_platform}" >&2
+  exit 64
+fi
+if [[ ! "${expected_commit}" =~ ^[0-9a-f]{40}$ ]]; then
+  printf 'expected commit must be exactly 40 lowercase hexadecimal characters\n' >&2
+  exit 64
+fi
+if [[ ! "${expected_tree}" =~ ^[0-9a-f]{40}$ ]]; then
+  printf 'expected tree must be exactly 40 lowercase hexadecimal characters\n' >&2
   exit 64
 fi
 for command_name in grep jq shasum strings tar; do
@@ -86,14 +96,46 @@ expected_os=${expected_platform%/*}
 expected_architecture=${expected_platform#*/}
 jq -e --arg os "${expected_os}" --arg arch "${expected_architecture}" \
   '.os == $os and .architecture == $arch' "${config_blob}" >/dev/null
-jq -e '
+if ! jq -e '
   .config.User == "65532:65532"
   and .config.Entrypoint == ["/nodejs/bin/node"]
   and .config.Cmd == ["dist/index.cjs"]
-  and (.config.Env | index("NODE_ENV=production") != null)
-  and (.config.Env | index("PORT=8080") != null)
-  and (.config.Env | index("DOTENV_CONFIG_PATH=/run/secrets/mkd-web.env") != null)
-' "${config_blob}" >/dev/null
+  and .config.ArgsEscaped == true
+  and .config.Env == [
+    "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+    "SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt",
+    "NODE_ENV=production",
+    "PORT=8080",
+    "DOTENV_CONFIG_PATH=/run/secrets/mkd-web.env"
+  ]
+  and .config.ExposedPorts == {"8080/tcp": {}}
+  and .config.StopSignal == "SIGTERM"
+' "${config_blob}" >/dev/null; then
+  printf 'Web OCI runtime config contract does not match\n' >&2
+  exit 66
+fi
+
+actual_revision=$(jq -r '.config.Labels["org.opencontainers.image.revision"] // empty' "${config_blob}")
+if [[ "${actual_revision}" != "${expected_commit}" ]]; then
+  printf 'Web OCI revision label does not match the expected commit\n' >&2
+  exit 66
+fi
+actual_tree=$(jq -r '.config.Labels["com.leo.mkd.source-tree"] // empty' "${config_blob}")
+if [[ "${actual_tree}" != "${expected_tree}" ]]; then
+  printf 'Web OCI source-tree label does not match the expected tree\n' >&2
+  exit 66
+fi
+if ! jq -e --arg revision "${expected_commit}" --arg tree "${expected_tree}" '
+  .config.Labels == {
+    "org.opencontainers.image.title": "mkd-customer-ops-web",
+    "org.opencontainers.image.version": "2.1.8-customer.1",
+    "org.opencontainers.image.revision": $revision,
+    "com.leo.mkd.source-tree": $tree
+  }
+' "${config_blob}" >/dev/null; then
+  printf 'Web OCI image labels do not match the exact release contract\n' >&2
+  exit 66
+fi
 
 jq -e '
   .schema == "mkd-web-runtime/v1"
@@ -121,11 +163,18 @@ while IFS= read -r layer_digest; do
     printf 'layer digest verification failed\n' >&2
     exit 66
   }
-  while IFS= read -r member; do
+  while IFS= read -r member <&3 && IFS= read -r verbose_member <&4; do
     normalized=${member#./}
     if [[ "${normalized}" == /* || "/${normalized}/" == *'/../'* ]]; then
       printf 'unsafe OCI layer member: %s\n' "${member}" >&2
       exit 66
+    fi
+    member_type=${verbose_member:0:1}
+    if [[ "${member_type}" == l || "${member_type}" == h ]]; then
+      if [[ "${normalized}" == app || "${normalized}" == app/* ]]; then
+        printf 'forbidden Web OCI app link: %s\n' "${member}" >&2
+        exit 66
+      fi
     fi
     if [[ "${normalized}" =~ (^|/)app/(server|client|shared|tests|script)(/|$) \
       || "${normalized}" =~ (^|/)\.git(/|$) \
@@ -134,7 +183,7 @@ while IFS= read -r layer_digest; do
       printf 'forbidden Web OCI layer path: %s\n' "${member}" >&2
       exit 66
     fi
-  done < <(tar -tf "${layer_blob}")
+  done 3< <(tar -tf "${layer_blob}") 4< <(tar -tvf "${layer_blob}")
 
   layer_strings="${temporary_root}/layer-$((layer_count + 1)).strings"
   if ! tar -xOf "${layer_blob}" 2>/dev/null | strings -a > "${layer_strings}"; then
@@ -153,5 +202,6 @@ if [[ "${layer_count}" -lt 1 ]]; then
   exit 66
 fi
 
-printf 'Web OCI verified: archive=%s platform=%s config=%s manifest=%s layers=%s SHA256SUMS=pass runtime-contract.json=pass\n' \
-  "${archive_name}" "${expected_platform}" "${config_digest}" "${manifest_digest}" "${layer_count}"
+printf 'Web OCI verified: archive=%s platform=%s config=%s manifest=%s layers=%s revision=%s source-tree=%s SHA256SUMS=pass runtime-contract.json=pass\n' \
+  "${archive_name}" "${expected_platform}" "${config_digest}" "${manifest_digest}" "${layer_count}" \
+  "${expected_commit}" "${expected_tree}"
