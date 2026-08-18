@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawn, type ChildProcess } from 'node:child_process';
+import { createHmac } from 'node:crypto';
 import { once } from 'node:events';
 import { access, mkdtemp, rm } from 'node:fs/promises';
 import { createServer, type Server } from 'node:http';
@@ -15,7 +16,9 @@ import { appErrorHandler } from '../../server/httpErrors.ts';
 import { CoreClient } from '../../server/coreClient.ts';
 import { requestContext } from '../../server/requestContext.ts';
 import { emptyAiPayload } from '../../server/services/ai3a/analysisService.ts';
+import { normalizeAiPayload } from '../../server/services/ai3a/payloadNormalizer.ts';
 import type { AiAnalysisRow } from '../../server/services/ai3a/repository.ts';
+import { aiPayloadSchema } from '../../shared/ai3a.ts';
 
 const aiRoutesUrl = new URL('../../server/aiRoutes.ts', import.meta.url);
 const fixtureExecutable = process.env.TASK13_CORE_FIXTURE_BIN?.trim();
@@ -56,6 +59,48 @@ async function closeServer(server: Server) {
   await once(server, 'close');
 }
 
+function signedSessionCookie(name: string, sessionId: string, secret: string): string {
+  const digest = createHmac('sha256', secret)
+    .update(sessionId)
+    .digest('base64')
+    .replace(/=+$/, '');
+  return `${name}=${encodeURIComponent(`s:${sessionId}.${digest}`)}`;
+}
+
+function spawnCore(
+  executable: string,
+  socketPath: string,
+  capturePath: string,
+  readyPath: string,
+): ChildProcess {
+  return spawn(executable, [
+    'serve',
+    '--socket',
+    socketPath,
+    '--capture',
+    capturePath,
+    '--ready',
+    readyPath,
+  ], {
+    stdio: ['ignore', 'ignore', 'pipe'],
+  });
+}
+
+function assertAcceptedAiPayload(parsed: {
+  analysis_status: 'valid' | 'incomplete';
+  model_name: string;
+  result: unknown;
+}) {
+  const normalized = normalizeAiPayload(parsed.result, {
+    source: 'generated',
+    modelName: parsed.model_name,
+    promptVersion: null,
+  });
+  assert.equal(normalized.status, parsed.analysis_status);
+  assert.equal(aiPayloadSchema.safeParse(normalized.payload).success, true);
+  return normalized.payload;
+}
+
 function syntheticStoredAnalysis(): AiAnalysisRow {
   return {
     analysis_id: '00000000-0000-4000-8000-000000001399',
@@ -80,7 +125,7 @@ function syntheticStoredAnalysis(): AiAnalysisRow {
 }
 
 test(
-  'authenticated Express AI routes use the real Rust core and preserve history during outage',
+  'protected Express AI routes use the real Rust core, preserve history, and recover after restart',
   {
     skip: !fixtureExecutable && !e2eRequired
       ? 'run through scripts/run-task13-web-core-e2e.sh'
@@ -107,17 +152,7 @@ test(
       : externalRoot;
     const socketPath = join(root, 'core.sock');
     const readyPath = join(root, 'ready.json');
-    const core = spawn(fixtureExecutable, [
-      'serve',
-      '--socket',
-      socketPath,
-      '--capture',
-      captureOutput,
-      '--ready',
-      readyPath,
-    ], {
-      stdio: ['ignore', 'ignore', 'pipe'],
-    });
+    let core = spawnCore(fixtureExecutable, socketPath, captureOutput, readyPath);
     const app = express();
     const httpServer = createServer(app);
 
@@ -125,29 +160,37 @@ test(
       await waitForFile(readyPath, core);
 
       app.use(express.json());
+      const sessionSecret = 'task13-test-session-secret-at-least-32-characters';
+      const sessionName = 'mkd.sid';
+      const sessionId = 'task13-preseeded-session-id';
+      const sessionStore = new session.MemoryStore();
+      await new Promise<void>((resolve, reject) => {
+        sessionStore.set(sessionId, {
+          cookie: new session.Cookie({
+            httpOnly: true,
+            path: '/',
+            sameSite: 'lax',
+          }),
+          user: {
+            id: 'user-1',
+            username: 'fixture-operator',
+            role: 'operator',
+            display_name: 'Fixture Operator',
+          },
+        }, (error) => {
+          if (error) reject(error);
+          else resolve();
+        });
+      });
       app.use(session({
-        secret: 'task13-test-session-secret-at-least-32-characters',
-        name: 'mkd.sid',
+        secret: sessionSecret,
+        name: sessionName,
         resave: false,
         saveUninitialized: false,
+        store: sessionStore,
         cookie: { httpOnly: true, sameSite: 'lax' },
       }));
       app.use(requestContext);
-      app.post('/test/session', (req, res, next) => {
-        req.session.user = {
-          id: 'user-1',
-          username: 'fixture-operator',
-          role: 'operator',
-          display_name: 'Fixture Operator',
-        };
-        req.session.save((error) => {
-          if (error) {
-            next(error);
-            return;
-          }
-          res.json({ ok: true });
-        });
-      });
 
       const stored = syntheticStoredAnalysis();
       const repository = {
@@ -169,12 +212,15 @@ test(
 
       const port = await listen(httpServer);
       const origin = `http://127.0.0.1:${port}`;
-      const login = await fetch(`${origin}/test/session`, { method: 'POST' });
-      assert.equal(login.status, 200);
-      const cookie = login.headers.get('set-cookie')?.split(';', 1)[0];
-      assert.match(cookie ?? '', /^mkd\.sid=/);
+      const unauthenticated = await fetch(`${origin}/api/skus/SKU-1/ai-refresh`, {
+        method: 'POST',
+        headers: { 'X-Request-ID': 'req-task13-unauthenticated' },
+      });
+      assert.equal(unauthenticated.status, 401);
+      assert.deepEqual(await unauthenticated.json(), { error: '未登录' });
+
       const headers = {
-        Cookie: cookie!,
+        Cookie: signedSessionCookie(sessionName, sessionId, sessionSecret),
         'X-Request-ID': 'req-task13-web',
       };
 
@@ -187,10 +233,9 @@ test(
       assert.equal(parsed.analysis_id, '00000000-0000-4000-8000-000000001301');
       assert.equal(parsed.analysis_status, 'valid');
       assert.equal(parsed.model_name, 'task13-fixture-model');
-      assert.deepEqual(parsed.result, {
-        schema_version: '3A.1',
-        overall_judgement: 'fixture-ok',
-      });
+      const normalized = assertAcceptedAiPayload(parsed);
+      assert.equal(normalized.schema_version, '3A.1');
+      assert.equal(normalized.conclusion.text, 'fixture-ok');
 
       const coreExit = once(core, 'exit');
       assert.equal(core.kill('SIGTERM'), true);
@@ -212,6 +257,25 @@ test(
       assert.equal(history.status, 200);
       const historyBody = await history.json() as { history?: unknown[] };
       assert.equal(historyBody.history?.length, 1);
+
+      const restartReadyPath = join(root, 'ready-restart.json');
+      const restartCapturePath = join(root, 'model-capture-restart.json');
+      core = spawnCore(
+        fixtureExecutable,
+        socketPath,
+        restartCapturePath,
+        restartReadyPath,
+      );
+      await waitForFile(restartReadyPath, core);
+
+      const recovered = await fetch(`${origin}/api/skus/SKU-1/ai-refresh`, {
+        method: 'POST',
+        headers,
+      });
+      assert.equal(recovered.status, 200);
+      const recoveredParsed = await parseAiRefreshResponse(recovered.clone());
+      assert.equal(recoveredParsed.analysis_status, 'valid');
+      assert.equal(assertAcceptedAiPayload(recoveredParsed).conclusion.text, 'fixture-ok');
     } finally {
       if (core.exitCode === null) {
         const coreExit = once(core, 'exit');

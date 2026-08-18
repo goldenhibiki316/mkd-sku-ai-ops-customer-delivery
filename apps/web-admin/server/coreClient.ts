@@ -1,5 +1,7 @@
 import { request as httpRequest } from 'node:http';
 
+import { normalizeAiPayload } from './services/ai3a/payloadNormalizer';
+
 export type CoreTransportRequest = {
   method: 'POST';
   path: string;
@@ -30,7 +32,11 @@ export type RefreshSkuInput = {
 export type CoreResponse = {
   status: string;
   request_id: string;
-} & Record<string, unknown>;
+  analysis_id?: unknown;
+  analysis_status?: unknown;
+  model_name?: unknown;
+  result?: unknown;
+};
 
 export type RefreshSkuResponse = CoreResponse & {
   status: 'success';
@@ -73,6 +79,14 @@ const approvedStatusContract = new Map<number, string>([
   [500, 'internal_error'],
   [502, 'model_failed'],
 ]);
+const approvedResponseFields = new Set([
+  'status',
+  'request_id',
+  'analysis_id',
+  'analysis_status',
+  'model_name',
+  'result',
+]);
 
 function requiredIdentifier(value: string, field: string): string {
   const normalized = value.trim();
@@ -87,36 +101,61 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function parseCoreResponse(body: unknown): CoreResponse {
   if (!isRecord(body)) throw new CoreProtocolError();
+  if (Object.keys(body).some((field) => !approvedResponseFields.has(field))) {
+    throw new CoreProtocolError('core response contains an unapproved field');
+  }
   const status = body.status;
   const requestId = body.request_id;
   if (typeof status !== 'string' || typeof requestId !== 'string') {
     throw new CoreProtocolError();
   }
-  return { ...body, status, request_id: requestId };
+  const parsed: CoreResponse = { status, request_id: requestId };
+  for (const field of ['analysis_id', 'analysis_status', 'model_name', 'result'] as const) {
+    if (Object.hasOwn(body, field)) parsed[field] = body[field];
+  }
+  return parsed;
 }
 
-function parseRefreshSkuSuccess(body: CoreResponse): RefreshSkuResponse {
+function parseRefreshSkuSuccess(
+  body: CoreResponse,
+  expectedRequestId: string,
+): RefreshSkuResponse {
   const analysisId = body.analysis_id;
   const analysisStatus = body.analysis_status;
   const modelName = body.model_name;
+  const result = body.result;
   if (
-    typeof analysisId !== 'string'
+    body.request_id !== expectedRequestId
+    || typeof analysisId !== 'string'
     || !analysisId.trim()
     || (analysisStatus !== 'valid' && analysisStatus !== 'incomplete')
     || typeof modelName !== 'string'
     || !modelName.trim()
-    || !Object.hasOwn(body, 'result')
+    || !isRecord(result)
+    || result.schema_version !== '3A.1'
   ) {
     throw new CoreProtocolError();
   }
+  try {
+    const normalized = normalizeAiPayload(result, {
+      source: 'generated',
+      modelName: modelName.trim(),
+      promptVersion: null,
+    });
+    if (normalized.status !== analysisStatus) {
+      throw new CoreProtocolError('core result status is inconsistent');
+    }
+  } catch (error) {
+    if (error instanceof CoreProtocolError) throw error;
+    throw new CoreProtocolError('core result does not satisfy the 3A.1 contract');
+  }
   return {
-    ...body,
     status: 'success',
-    request_id: body.request_id,
-    analysis_id: analysisId,
+    request_id: expectedRequestId,
+    analysis_id: analysisId.trim(),
     analysis_status: analysisStatus,
-    model_name: modelName,
-    result: body.result,
+    model_name: modelName.trim(),
+    result,
   };
 }
 
@@ -185,12 +224,13 @@ export class CoreClient {
   }
 
   async refreshSku(input: RefreshSkuInput): Promise<RefreshSkuResponse> {
+    const requestId = requiredIdentifier(input.requestId, 'requestId');
     const response = await this.transport({
       method: 'POST',
       path: '/v1/sku-analysis/refresh',
       body: {
         sku: requiredIdentifier(input.sku, 'sku'),
-        request_id: requiredIdentifier(input.requestId, 'requestId'),
+        request_id: requestId,
         actor_id: requiredIdentifier(input.actorId, 'actorId'),
       },
     });
@@ -203,13 +243,16 @@ export class CoreClient {
       throw new CoreProtocolError('core returned an unapproved HTTP status');
     }
     const parsed = parseCoreResponse(response.body);
+    if (parsed.request_id !== requestId) {
+      throw new CoreProtocolError('core response request_id does not match');
+    }
     if (parsed.status !== expectedStatus) {
       throw new CoreProtocolError('core HTTP status and response status disagree');
     }
     if (response.status !== 200) {
       throw new CoreResponseError(response.status, parsed);
     }
-    return parseRefreshSkuSuccess(parsed);
+    return parseRefreshSkuSuccess(parsed, requestId);
   }
 }
 

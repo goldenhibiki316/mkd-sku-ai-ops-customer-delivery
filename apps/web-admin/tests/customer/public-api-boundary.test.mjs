@@ -8,6 +8,7 @@ const repositoryUrl = new URL(
   '../../server/services/ai3a/repository.ts',
   import.meta.url,
 );
+const coreE2eUrl = new URL('./core-e2e.test.ts', import.meta.url);
 
 test('public routes preserve approved APIs and delegate refresh to the local core', async () => {
   let routesExist = true;
@@ -71,4 +72,13 @@ test('AI refresh preserves approved core statuses and reserves 503 for transport
     /error instanceof CoreUnavailableError\s*\|\|\s*error instanceof CoreProtocolError/,
   );
   assert.match(routes, /res\.status\(503\)/);
+});
+
+test('cross-repository E2E authenticates through a pre-seeded real session only', async () => {
+  const e2e = await readFile(coreE2eUrl, 'utf8');
+
+  assert.doesNotMatch(e2e, /\/test\/session/);
+  assert.match(e2e, /new session\.MemoryStore\(\)/);
+  assert.match(e2e, /unauthenticated\.status, 401/);
+  assert.match(e2e, /createHmac\(['"]sha256['"]/);
 });

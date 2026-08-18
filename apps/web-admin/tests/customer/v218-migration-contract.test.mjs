@@ -60,7 +60,12 @@ test('v2.1.8 customer delivery still exposes only the public core contract', asy
 
   assert.match(aiRoutes, /coreClient\.refreshSku/);
   assert.match(coreClient, /sku:\s*requiredIdentifier\(input\.sku/);
-  assert.match(coreClient, /request_id:\s*requiredIdentifier\(input\.requestId/);
+  assert.match(
+    coreClient,
+    /const requestId = requiredIdentifier\(input\.requestId,\s*'requestId'\);/,
+  );
+  assert.match(coreClient, /request_id:\s*requestId/);
+  assert.match(coreClient, /if \(parsed\.request_id !== requestId\)/);
   assert.match(coreClient, /actor_id:\s*requiredIdentifier\(input\.actorId/);
 
   for (const forbidden of [
