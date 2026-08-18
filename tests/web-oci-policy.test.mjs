@@ -249,6 +249,16 @@ test('Web OCI verifier and build context exclusions are present', async () => {
 });
 
 test('Web OCI verifier rejects protected plaintext inside an allowed layer path', async (context) => {
+  const missingHostTools = ['grep', 'jq', 'shasum', 'strings', 'tar']
+    .filter((command) => spawnSync(
+      'sh',
+      ['-c', `command -v ${command} >/dev/null 2>&1`],
+      { encoding: 'utf8' },
+    ).status !== 0);
+  if (missingHostTools.length > 0) {
+    context.skip(`host release tools unavailable: ${missingHostTools.join(', ')}`);
+    return;
+  }
   const fixtureRoot = await mkdtemp(path.join(tmpdir(), 'mkd-web-oci-test-'));
   context.after(() => rm(fixtureRoot, { recursive: true, force: true }));
   const { archivePath, sumsPath } = await writeOciFixture(
