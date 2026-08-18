@@ -2,18 +2,15 @@ import assert from 'node:assert/strict';
 import { access } from 'node:fs/promises';
 import test from 'node:test';
 
+import type { CoreTransportRequest } from '../../server/coreClient';
+import type { GeneratedAnalysisResult } from '../../server/services/ai3a/generatedResultSchema';
+
 const moduleUrl = new URL('../../server/coreClient.ts', import.meta.url);
 
-function validAnalysisResult() {
-  const evidence = Object.fromEntries([
-    'sales',
-    'profit',
-    'traffic',
-    'inventory',
-    'aftersales',
-    'competition',
-    'lifecycle',
-  ].map((dimension) => [dimension, {
+function validDimension(
+  dimension: keyof GeneratedAnalysisResult['diagnosis'],
+): GeneratedAnalysisResult['diagnosis']['sales'] {
+  return {
     summary: `${dimension}-ok`,
     evidence: [{
       metric: `${dimension}_fixture`,
@@ -21,8 +18,10 @@ function validAnalysisResult() {
       threshold: '0',
       verdict: 'fixture-ok',
     }],
-  }]));
+  };
+}
 
+function validAnalysisResult(): GeneratedAnalysisResult {
   return {
     schema_version: '3A.1',
     sop_v3_type: 'fixture-decision',
@@ -30,7 +29,15 @@ function validAnalysisResult() {
     overall_judgement: 'fixture-ok',
     risk_level: 'low',
     risk_tags: [],
-    diagnosis: evidence,
+    diagnosis: {
+      sales: validDimension('sales'),
+      profit: validDimension('profit'),
+      traffic: validDimension('traffic'),
+      inventory: validDimension('inventory'),
+      aftersales: validDimension('aftersales'),
+      competition: validDimension('competition'),
+      lifecycle: validDimension('lifecycle'),
+    },
     actions: [{
       task_type: 'monitor',
       title: 'Monitor fixture SKU',
@@ -57,10 +64,10 @@ test('refreshSku sends only protocol metadata and one SKU', async () => {
   if (!moduleExists) return;
 
   const { CoreClient } = await import(moduleUrl.href);
-  const seen: unknown[] = [];
+  const seen: CoreTransportRequest[] = [];
   const client = new CoreClient({
     socketPath: '/tmp/test.sock',
-    transport: async (request) => {
+    transport: async (request: CoreTransportRequest) => {
       seen.push(request);
       return {
         status: 200,
@@ -172,8 +179,14 @@ test('refreshSku rejects every incomplete or malformed HTTP 200 success body', a
   });
   const emptyDimensionEvidence = validAnalysisResult();
   emptyDimensionEvidence.diagnosis.sales.evidence = [];
-  const missingDimension = validAnalysisResult();
-  delete missingDimension.diagnosis.lifecycle;
+  const {
+    lifecycle: _missingLifecycle,
+    ...diagnosisWithoutLifecycle
+  } = validAnalysisResult().diagnosis;
+  const missingDimension = {
+    ...validAnalysisResult(),
+    diagnosis: diagnosisWithoutLifecycle,
+  };
   const blankConclusion = validAnalysisResult();
   blankConclusion.overall_judgement = '   ';
   const {
@@ -361,8 +374,8 @@ test('refreshSku preserves the approved core HTTP status contract', async () => 
     const body = {
       status: coreStatus,
       request_id: `req-${statusCode}`,
-      analysis_id: null,
-      result: null,
+      analysis_id: statusCode === 409 ? 'analysis-in-progress' : null,
+      result: { message: `fixture ${coreStatus}` },
     };
     const client = new CoreClient({
       socketPath: '/tmp/test.sock',
@@ -378,9 +391,97 @@ test('refreshSku preserves the approved core HTTP status contract', async () => 
       (error: unknown) => {
         assert.equal(error instanceof CoreResponseError, true);
         assert.equal((error as InstanceType<typeof CoreResponseError>).statusCode, statusCode);
-        assert.deepEqual((error as InstanceType<typeof CoreResponseError>).response, body);
+        const safeResponse = (error as InstanceType<typeof CoreResponseError>).response;
+        assert.notStrictEqual(safeResponse, body);
+        assert.notStrictEqual(safeResponse.result, body.result);
+        assert.deepEqual(safeResponse, body);
         return true;
       },
     );
   }
+});
+
+test('refreshSku rejects malformed non-200 core response fields', async (context) => {
+  const {
+    CoreClient,
+    CoreProtocolError,
+  } = await import(moduleUrl.href);
+  const validBody: Record<string, unknown> = {
+    status: 'schema_invalid',
+    request_id: 'req-422-invalid',
+    analysis_id: null,
+    result: { message: 'fixture schema failure' },
+  };
+  const cases: Array<[string, Record<string, unknown>]> = [
+    ['missing status', { ...validBody, status: undefined }],
+    ['wrong status type', { ...validBody, status: 422 }],
+    ['success status', { ...validBody, status: 'success' }],
+    ['missing request_id', { ...validBody, request_id: undefined }],
+    ['wrong request_id type', { ...validBody, request_id: 422 }],
+    ['missing analysis_id', { ...validBody, analysis_id: undefined }],
+    ['blank analysis_id', { ...validBody, analysis_id: '   ' }],
+    ['wrong analysis_id type', { ...validBody, analysis_id: 422 }],
+    ['missing result', { ...validBody, result: undefined }],
+    ['null result', { ...validBody, result: null }],
+    ['wrong result type', { ...validBody, result: 'fixture failure' }],
+    ['missing message', { ...validBody, result: {} }],
+    ['blank message', { ...validBody, result: { message: '   ' } }],
+    ['wrong message type', { ...validBody, result: { message: 422 } }],
+    [
+      'success-only analysis_status',
+      { ...validBody, analysis_status: 'incomplete' },
+    ],
+    ['success-only model_name', { ...validBody, model_name: 'fixture-model' }],
+    ['unknown top-level field', { ...validBody, prompt: 'must-not-pass' }],
+  ];
+
+  for (const [name, body] of cases) {
+    await context.test(name, async () => {
+      const client = new CoreClient({
+        socketPath: '/tmp/test.sock',
+        transport: async () => ({ status: 422, body }),
+      });
+
+      await assert.rejects(
+        () => client.refreshSku({
+          sku: 'SKU-1',
+          requestId: 'req-422-invalid',
+          actorId: 'user-1',
+        }),
+        CoreProtocolError,
+      );
+    });
+  }
+});
+
+test('refreshSku rejects private fields nested in a non-200 core response', async () => {
+  const {
+    CoreClient,
+    CoreProtocolError,
+  } = await import(moduleUrl.href);
+  const client = new CoreClient({
+    socketPath: '/tmp/test.sock',
+    transport: async () => ({
+      status: 422,
+      body: {
+        status: 'schema_invalid',
+        request_id: 'req-422-private',
+        analysis_id: null,
+        result: {
+          message: 'fixture schema failure',
+          private_prompt: 'must-not-pass',
+          debug: { sql: 'must-not-pass' },
+        },
+      },
+    }),
+  });
+
+  await assert.rejects(
+    () => client.refreshSku({
+      sku: 'SKU-1',
+      requestId: 'req-422-private',
+      actorId: 'user-1',
+    }),
+    CoreProtocolError,
+  );
 });

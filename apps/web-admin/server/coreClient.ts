@@ -1,4 +1,5 @@
 import { request as httpRequest } from 'node:http';
+import { z } from 'zod';
 
 import {
   generatedAnalysisResultSchema,
@@ -50,6 +51,19 @@ export type RefreshSkuResponse = CoreResponse & {
   result: GeneratedAnalysisResult;
 };
 
+export type CoreErrorResponse = {
+  status:
+    | 'invalid_request'
+    | 'not_found'
+    | 'generating'
+    | 'schema_invalid'
+    | 'internal_error'
+    | 'model_failed';
+  request_id: string;
+  analysis_id: string | null;
+  result: { message: string };
+};
+
 export class CoreUnavailableError extends Error {
   constructor(message = 'proprietary core is unavailable') {
     super(message);
@@ -67,7 +81,7 @@ export class CoreProtocolError extends Error {
 export class CoreResponseError extends Error {
   constructor(
     readonly statusCode: number,
-    readonly response: CoreResponse,
+    readonly response: CoreErrorResponse,
   ) {
     super(`proprietary core returned ${statusCode}`);
     this.name = 'CoreResponseError';
@@ -91,6 +105,21 @@ const approvedResponseFields = new Set([
   'model_name',
   'result',
 ]);
+const coreErrorResponseSchema = z.object({
+  status: z.enum([
+    'invalid_request',
+    'not_found',
+    'generating',
+    'schema_invalid',
+    'internal_error',
+    'model_failed',
+  ]),
+  request_id: z.string().min(1),
+  analysis_id: z.string().trim().min(1).nullable(),
+  result: z.object({
+    message: z.string().trim().min(1),
+  }).strict(),
+}).strict();
 
 function requiredIdentifier(value: string, field: string): string {
   const normalized = value.trim();
@@ -118,6 +147,19 @@ function parseCoreResponse(body: unknown): CoreResponse {
     if (Object.hasOwn(body, field)) parsed[field] = body[field];
   }
   return parsed;
+}
+
+function parseCoreErrorResponse(body: unknown): CoreErrorResponse {
+  const parsed = coreErrorResponseSchema.safeParse(body);
+  if (!parsed.success) {
+    throw new CoreProtocolError('core error response does not satisfy the strict contract');
+  }
+  return {
+    status: parsed.data.status,
+    request_id: parsed.data.request_id,
+    analysis_id: parsed.data.analysis_id,
+    result: { message: parsed.data.result.message },
+  };
 }
 
 function parseRefreshSkuSuccess(
@@ -249,15 +291,22 @@ export class CoreClient {
     if (!expectedStatus) {
       throw new CoreProtocolError('core returned an unapproved HTTP status');
     }
+    if (response.status !== 200) {
+      const parsedError = parseCoreErrorResponse(response.body);
+      if (parsedError.request_id !== requestId) {
+        throw new CoreProtocolError('core response request_id does not match');
+      }
+      if (parsedError.status !== expectedStatus) {
+        throw new CoreProtocolError('core HTTP status and response status disagree');
+      }
+      throw new CoreResponseError(response.status, parsedError);
+    }
     const parsed = parseCoreResponse(response.body);
     if (parsed.request_id !== requestId) {
       throw new CoreProtocolError('core response request_id does not match');
     }
     if (parsed.status !== expectedStatus) {
       throw new CoreProtocolError('core HTTP status and response status disagree');
-    }
-    if (response.status !== 200) {
-      throw new CoreResponseError(response.status, parsed);
     }
     return parseRefreshSkuSuccess(parsed, requestId);
   }
