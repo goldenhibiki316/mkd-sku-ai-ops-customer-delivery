@@ -101,6 +101,52 @@ test('refreshSku sends only protocol metadata and one SKU', async () => {
   });
 });
 
+test('refreshSku accepts strict incomplete results when the declared status matches', async (context) => {
+  const { CoreClient } = await import(moduleUrl.href);
+  const cases: Array<[string, (result: ReturnType<typeof validAnalysisResult>) => void]> = [
+    ['empty actions', (result) => { result.actions = []; }],
+    ['empty traffic evidence', (result) => { result.diagnosis.traffic.evidence = []; }],
+    ['unknown risk', (result) => { result.risk_level = 'unknown'; }],
+    ['pending risk', (result) => { result.risk_level = 'pending'; }],
+    ['high risk without tags', (result) => { result.risk_level = 'high'; }],
+    ['medium risk without tags', (result) => { result.risk_level = 'medium'; }],
+    ['reported missing inputs', (result) => {
+      result.missing_inputs = ['weekly_gmv_clp'];
+    }],
+  ];
+
+  for (const [name, mutate] of cases) {
+    await context.test(name, async () => {
+      const result = validAnalysisResult();
+      mutate(result);
+      const client = new CoreClient({
+        socketPath: '/tmp/test.sock',
+        transport: async () => ({
+          status: 200,
+          body: {
+            status: 'success',
+            request_id: 'req-1',
+            analysis_id: 'analysis-1',
+            analysis_status: 'incomplete',
+            model_name: 'fixture-model',
+            result,
+          },
+        }),
+      });
+
+      const response = await client.refreshSku({
+        sku: 'SKU-1',
+        requestId: 'req-1',
+        actorId: 'user-1',
+      });
+
+      assert.equal(response.analysis_status, 'incomplete');
+      assert.notStrictEqual(response.result, result);
+      assert.deepEqual(response.result, result);
+    });
+  }
+});
+
 test('refreshSku rejects every incomplete or malformed HTTP 200 success body', async (context) => {
   const {
     CoreClient,
@@ -128,6 +174,12 @@ test('refreshSku rejects every incomplete or malformed HTTP 200 success body', a
   emptyDimensionEvidence.diagnosis.sales.evidence = [];
   const missingDimension = validAnalysisResult();
   delete missingDimension.diagnosis.lifecycle;
+  const blankConclusion = validAnalysisResult();
+  blankConclusion.overall_judgement = '   ';
+  const {
+    overall_judgement: _missingOverallJudgement,
+    ...missingConclusion
+  } = validAnalysisResult();
   const cases: Array<[string, Record<string, unknown>]> = [
     ['missing analysis_id', { ...validBody, analysis_id: undefined }],
     ['empty analysis_id', { ...validBody, analysis_id: '   ' }],
@@ -146,12 +198,18 @@ test('refreshSku rejects every incomplete or malformed HTTP 200 success body', a
         result: { ...validAnalysisResult(), schema_version: '3A.0' },
       },
     ],
+    ['blank overall judgement', { ...validBody, result: blankConclusion }],
+    ['missing overall judgement', { ...validBody, result: missingConclusion }],
     [
       'valid status with incomplete result',
       {
         ...validBody,
         result: { ...validAnalysisResult(), missing_inputs: ['fixture-source'] },
       },
+    ],
+    [
+      'incomplete status with complete result',
+      { ...validBody, analysis_status: 'incomplete' },
     ],
     [
       'nested private_prompt in evidence',
@@ -170,10 +228,9 @@ test('refreshSku rejects every incomplete or malformed HTTP 200 success body', a
       { ...validBody, result: unknownDiagnosisField },
     ],
     [
-      'empty seven-dimensional evidence',
+      'valid status with empty seven-dimensional evidence',
       {
         ...validBody,
-        analysis_status: 'incomplete',
         result: emptyDimensionEvidence,
       },
     ],

@@ -17,7 +17,7 @@ const generatedEvidenceItemSchema = z.object({
 
 const generatedDimensionSchema = z.object({
   summary: nonEmptyText,
-  evidence: z.array(generatedEvidenceItemSchema).min(1),
+  evidence: z.array(generatedEvidenceItemSchema),
 }).strict();
 
 const generatedDiagnosisSchema = z.object({
