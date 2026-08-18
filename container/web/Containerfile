@@ -25,7 +25,7 @@ RUN case "${WEB_COMMIT_SHA}" in \
     && npm run test:customer --prefix apps/web-admin \
     && APP_COMMIT_SHA="${WEB_COMMIT_SHA}" APP_BRANCH="${WEB_BRANCH}" SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH}" npm run build --prefix apps/web-admin \
     && mkdir -p /runtime \
-    && cp apps/web-admin/package.json apps/web-admin/package-lock.json /runtime/ \
+    && cp container/web/runtime/package.json container/web/runtime/package-lock.json /runtime/ \
     && npm ci --omit=dev --ignore-scripts --prefix /runtime \
     && find /runtime/node_modules -type f -iname 'README*' -delete \
     && find /runtime/node_modules -type f -name '*.map' -delete \

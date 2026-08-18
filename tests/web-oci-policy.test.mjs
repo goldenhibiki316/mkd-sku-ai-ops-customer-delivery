@@ -125,6 +125,9 @@ test('Web OCI builds a tested immutable commit and copies only runtime assets', 
   const containerfile = await mustRead('container/web/Containerfile');
   const rootPackage = JSON.parse(await mustRead('package.json'));
   const webPackage = JSON.parse(await mustRead('apps/web-admin/package.json'));
+  const runtimePackage = JSON.parse(
+    await mustRead('container/web/runtime/package.json'),
+  );
 
   for (const marker of [
     'ARG WEB_COMMIT_SHA',
@@ -134,6 +137,7 @@ test('Web OCI builds a tested immutable commit and copies only runtime assets', 
     'npm run check --prefix apps/web-admin',
     'npm run test:customer --prefix apps/web-admin',
     'npm run build --prefix apps/web-admin',
+    'container/web/runtime/package-lock.json',
     'npm ci --omit=dev --ignore-scripts --prefix /runtime',
     'find /runtime/node_modules -type f',
     'USER 65532:65532',
@@ -158,6 +162,15 @@ test('Web OCI builds a tested immutable commit and copies only runtime assets', 
     [],
     'type-only packages must stay out of the runtime dependency graph',
   );
+  assert.deepEqual(Object.keys(runtimePackage.dependencies).sort(), [
+    'bcryptjs',
+    'connect-pg-simple',
+    'dotenv',
+    'express',
+    'express-session',
+    'pg',
+    'zod',
+  ]);
   assert.equal(
     rootPackage.scripts['test:container'],
     'node --test tests/delivery-boundary.test.mjs tests/web-oci-policy.test.mjs',
