@@ -134,6 +134,7 @@ test('Web OCI verifier and build context exclusions are present', async () => {
     '**/dist',
     '.env',
     '**/.env*',
+    '!apps/web-admin/.env.example',
     '*.key',
     '*.pem',
     '*.map',

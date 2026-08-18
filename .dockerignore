@@ -8,6 +8,7 @@ dist
 .env
 .env.*
 **/.env*
+!apps/web-admin/.env.example
 *.key
 *.pem
 *.p8
