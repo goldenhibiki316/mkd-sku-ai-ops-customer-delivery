@@ -20,7 +20,7 @@ RUN case "${WEB_COMMIT_SHA}" in \
       *) ;; \
     esac \
     && npm ci --ignore-scripts --prefix apps/web-admin \
-    && npm test \
+    && npm run test:container \
     && npm run check --prefix apps/web-admin \
     && npm run test:customer --prefix apps/web-admin \
     && APP_COMMIT_SHA="${WEB_COMMIT_SHA}" APP_BRANCH="${WEB_BRANCH}" SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH}" npm run build --prefix apps/web-admin \

@@ -2,9 +2,12 @@
 .github
 .worktrees
 node_modules
+**/node_modules
 dist
+**/dist
 .env
 .env.*
+**/.env*
 *.key
 *.pem
 *.p8
@@ -12,6 +15,7 @@ dist
 *.pfx
 *.crt
 *.map
+**/*.map
 *.md
 *.doc
 *.docx

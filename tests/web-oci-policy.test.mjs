@@ -32,12 +32,13 @@ test('Web OCI uses pinned build and distroless runtime images', async () => {
 
 test('Web OCI builds a tested immutable commit and copies only runtime assets', async () => {
   const containerfile = await mustRead('container/web/Containerfile');
+  const rootPackage = JSON.parse(await mustRead('package.json'));
 
   for (const marker of [
     'ARG WEB_COMMIT_SHA',
     'ARG SOURCE_DATE_EPOCH',
     'npm ci --ignore-scripts',
-    'npm test',
+    'npm run test:container',
     'npm run check --prefix apps/web-admin',
     'npm run test:customer --prefix apps/web-admin',
     'npm run build --prefix apps/web-admin',
@@ -59,6 +60,10 @@ test('Web OCI builds a tested immutable commit and copies only runtime assets', 
     /COPY[^\n]+\/(?:server|client|shared|tests|script)(?:\s|\/)/u,
   );
   assert.doesNotMatch(runtimeStage, /(?:npm|npx|apt-get|apk)\s/u);
+  assert.equal(
+    rootPackage.scripts['test:container'],
+    'node --test tests/delivery-boundary.test.mjs tests/web-oci-policy.test.mjs',
+  );
 });
 
 test('Web OCI build identity uses the source commit timestamp', async () => {
@@ -103,6 +108,8 @@ test('Web OCI build emits separate archives for both customer architectures', as
   assert.match(script, /mkd-web-linux-amd64\.oci\.tar/u);
   assert.match(script, /mkd-web-linux-arm64\.oci\.tar/u);
   assert.match(script, /SHA256SUMS/u);
+  assert.match(script, /npm test/u);
+  assert.match(script, /verify-git-history\.sh/u);
 });
 
 test('Web OCI verifier and build context exclusions are present', async () => {
@@ -122,11 +129,15 @@ test('Web OCI verifier and build context exclusions are present', async () => {
   for (const excluded of [
     '.git',
     'node_modules',
+    '**/node_modules',
     'dist',
+    '**/dist',
     '.env',
+    '**/.env*',
     '*.key',
     '*.pem',
     '*.map',
+    '**/*.map',
     'docs',
     'internal',
   ]) {

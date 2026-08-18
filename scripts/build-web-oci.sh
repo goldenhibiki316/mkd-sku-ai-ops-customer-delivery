@@ -49,6 +49,21 @@ if [[ ! "${source_date_epoch}" =~ ^[0-9]{9,12}$ ]]; then
   exit 65
 fi
 
+(
+  cd "${repo_root}"
+  npm ci --ignore-scripts --prefix apps/web-admin
+  npm audit --prefix apps/web-admin --audit-level=moderate
+  npm test
+  npm run check --prefix apps/web-admin
+  npm run test:customer --prefix apps/web-admin
+  APP_COMMIT_SHA="${web_commit_sha}" \
+    APP_BRANCH="${web_branch}" \
+    SOURCE_DATE_EPOCH="${source_date_epoch}" \
+    npm run build --prefix apps/web-admin
+  node scripts/verify-delivery-boundary.mjs
+  bash scripts/verify-git-history.sh
+)
+
 mkdir -p "${output_dir}"
 
 build_archive() {
