@@ -1,0 +1,54 @@
+ARG NODE_BUILD_IMAGE=node:22-bookworm-slim@sha256:d649c27dae7ba0137b3cef5dd75baa422c08dc3d9e3fc0c23dfb172dc3cc6436
+ARG NODE_RUNTIME_IMAGE=gcr.io/distroless/nodejs22-debian13:nonroot@sha256:939d6f1671529d230f50b563578e9b5d206af58f038b10ebd7e1233023d4e167
+
+FROM ${NODE_BUILD_IMAGE} AS build
+
+WORKDIR /src
+
+ARG WEB_COMMIT_SHA
+ARG WEB_BRANCH=feat/customer-delivery-b2splus
+ARG SOURCE_DATE_EPOCH
+
+COPY . .
+
+RUN case "${WEB_COMMIT_SHA}" in \
+      [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;; \
+      *) echo 'WEB_COMMIT_SHA must be 40 lowercase hexadecimal characters' >&2; exit 64 ;; \
+    esac \
+    && case "${SOURCE_DATE_EPOCH}" in \
+      ''|*[!0-9]*) echo 'SOURCE_DATE_EPOCH must contain decimal seconds' >&2; exit 64 ;; \
+      *) ;; \
+    esac \
+    && npm ci --ignore-scripts --prefix apps/web-admin \
+    && npm test \
+    && npm run check --prefix apps/web-admin \
+    && npm run test:customer --prefix apps/web-admin \
+    && APP_COMMIT_SHA="${WEB_COMMIT_SHA}" APP_BRANCH="${WEB_BRANCH}" SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH}" npm run build --prefix apps/web-admin \
+    && npm prune --omit=dev --ignore-scripts --prefix apps/web-admin \
+    && find apps/web-admin/node_modules -type f -name '*.map' -delete \
+    && ! find apps/web-admin/dist apps/web-admin/node_modules -type f -name '*.map' -print -quit | grep -q .
+
+FROM ${NODE_RUNTIME_IMAGE}
+
+ARG WEB_COMMIT_SHA
+ARG SOURCE_DATE_EPOCH
+
+LABEL org.opencontainers.image.title="mkd-customer-ops-web" \
+      org.opencontainers.image.version="2.1.8-customer.1" \
+      org.opencontainers.image.revision="${WEB_COMMIT_SHA}" \
+      org.opencontainers.image.created="${SOURCE_DATE_EPOCH}"
+
+WORKDIR /app
+
+ENV NODE_ENV=production
+ENV PORT=8080
+ENV DOTENV_CONFIG_PATH=/run/secrets/mkd-web.env
+
+COPY --from=build --chown=65532:65532 /src/apps/web-admin/dist ./dist
+COPY --from=build --chown=65532:65532 /src/apps/web-admin/node_modules ./node_modules
+COPY --from=build --chown=65532:65532 /src/apps/web-admin/package.json ./package.json
+
+USER 65532:65532
+EXPOSE 8080
+ENTRYPOINT ["/nodejs/bin/node"]
+CMD ["dist/index.cjs"]

@@ -21,6 +21,14 @@ function gitValue(args: string[]): string | null {
 function resolveVersion() {
   const environmentSha = process.env.APP_COMMIT_SHA?.trim() || '';
   const repositorySha = gitValue(['rev-parse', 'HEAD']) || '';
+  const sourceDateEpoch = process.env.SOURCE_DATE_EPOCH?.trim() || '';
+  const sourceDateEpochSeconds = /^\d{1,12}$/.test(sourceDateEpoch)
+    ? Number(sourceDateEpoch)
+    : null;
+  const builtAt = sourceDateEpochSeconds !== null
+    && Number.isSafeInteger(sourceDateEpochSeconds)
+    ? new Date(sourceDateEpochSeconds * 1000).toISOString()
+    : new Date().toISOString();
   const commitSha = FULL_SHA.test(environmentSha)
     ? environmentSha
     : FULL_SHA.test(repositorySha)
@@ -28,8 +36,10 @@ function resolveVersion() {
       : 'unknown';
   return {
     commit_sha: commitSha,
-    branch: gitValue(['branch', '--show-current']) || 'unknown',
-    built_at: new Date().toISOString(),
+    branch: process.env.APP_BRANCH?.trim()
+      || gitValue(['branch', '--show-current'])
+      || 'unknown',
+    built_at: builtAt,
     working_tree_dirty: Boolean(gitValue(['status', '--porcelain'])),
     application: 'mkd-customer-ops-web' as const,
   };

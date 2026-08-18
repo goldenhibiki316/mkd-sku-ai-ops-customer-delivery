@@ -1,0 +1,19 @@
+{
+  "schema": "mkd-web-runtime/v1",
+  "container_port": 8080,
+  "user": "65532:65532",
+  "read_only_root": true,
+  "cap_drop": [
+    "ALL"
+  ],
+  "security_opt": [
+    "no-new-privileges"
+  ],
+  "tmpfs": [
+    "/tmp:rw,noexec,nosuid,size=16m"
+  ],
+  "readonly_config_mount": "/run/secrets/mkd-web.env",
+  "socket_mount": "/run/mkd-core",
+  "health_path": "/api/health",
+  "version_path": "/api/version"
+}
